@@ -4,13 +4,18 @@ backend/app/.env.backup
 backend/app/.env.production
 backend/app/.phpactor.json
 backend/app/.phpunit.result.cache
-backend/app/node_modules
 backend/app/public/build
 backend/app/public/hot
-backend/app/storage
+backend/app/storage/logs
+backend/app/storage/framework
+backend/app/storage/app/public
 backend/app/bootstrap/cache
 backend/app/database/*.sqlite
 backend/app/vendor
+backend/app/.idea
+backend/app/.vscode
+backend/app/phpunit.xml
+backend/app/.phpunit.cache
 # Frontend
 frontend/node_modules/
 frontend/dist
@@ -18,3 +23,5 @@ frontend/.vite
 # General
 .DS_Store
 *.log
+# Docker
+**/.env.*.local
