@@ -6,7 +6,7 @@ use App\Http\Controllers\AppController;
 use App\Http\Middleware\LocalJwtAuth;
 
 Route::get('/health', function () {
-    return response()->json(['status' => 'ok']);
+    return response()->json(['ok' => true]);
 });
 
 // Preflight responder (Laravel's HandleCors may also handle this)

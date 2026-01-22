@@ -8,17 +8,19 @@ services:
     volumes:
       - ./backend/app:/var/www/html
     environment:
-      APP_ENV: local
-      APP_DEBUG: "true"
-      APP_URL: http://localhost:8000
-      FRONTEND_ORIGIN: http://localhost:5173
+      RUN_MIGRATIONS: "1"
+      #APP_ENV: local
+      #APP_DEBUG: "true"
+      #APP_URL: http://localhost:8000
+      #FRONTEND_ORIGIN: http://localhost:5173
       # Tool Support JWT verification (optional but recommended)
-      TOOLSUPPORT_JWKS_URL: ""
-      TOOLSUPPORT_JWT_ISS: ""
-      TOOLSUPPORT_JWT_AUD: ""
-      TOOLSUPPORT_SKIP_SIGNATURE: "true" #REMOVE FOR PROD!
+      #TOOLSUPPORT_JWKS_URL: "https://lti.canvas.ox.ac.uk/.well-known/jwks.json" #prod
+      #TOOLSUPPORT_JWKS_URL: "https://tools-dev.canvas.ox.ac.uk/.well-known/jwks.json" #dev
+      #TOOLSUPPORT_JWT_ISS: ""
+      #TOOLSUPPORT_JWT_AUD: ""
+      #TOOLSUPPORT_SKIP_SIGNATURE: "true" #REMOVE FOR PROD!
       # Local stateless API auth
-      LOCAL_JWT_SECRET: "change-me-in-compose"
+      #LOCAL_JWT_SECRET: "change-me-in-compose"
     #healthcheck:
     #  test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
     #  interval: 5s
