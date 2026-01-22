@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Alert } from '@instructure/ui'
 
 function jsonHeaders(token) {
   const h = { 'Content-Type': 'application/json' }
@@ -49,7 +50,17 @@ function buildSrcDoc(pkg) {
         window.sdk = {
           getState: () => callParent('getState'),
           setState: (state) => callParent('setState', {state}),
+          notify: (input) => {
+            const payload =
+            typeof input === 'string'
+              ? { message: input, variant: 'info' }
+              : { message: String(input?.message ?? ''), variant: String(input?.variant ?? 'info') }
+              return callParent('notify', payload)
+          }
         };
+        
+        // Nice dev-friendly shim: if generated apps call alert(), turn it into a notify.
+        window.alert = (msg) => window.sdk.notify({ variant: 'info', message: String(msg) });
       })();
     </script>
     <script>
@@ -62,8 +73,22 @@ ${js}
 export default function Runner({ apiBase, token, pkg }) {
   const iframeRef = useRef(null)
   const [log, setLog] = useState([])
+  const [notices, setNotices] = useState([]) //used to display notifications from iFramed app via callParent('notify', payload);
 
   const srcDoc = useMemo(() => buildSrcDoc(pkg), [pkg])
+
+  //helper for pushing notices from iFramed app into Alert in this container app
+  function pushNotice({ message, variant }) {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const msg = String(message || '').slice(0, 300)
+
+    // Instructure variants commonly include: info, success, warning, danger
+    const v = (variant === 'error') ? 'danger' : variant
+    const safeVariant = ['info', 'success', 'warning', 'danger'].includes(v) ? v : 'info'
+
+    setNotices((xs) => [...xs, { id, message: msg, variant: safeVariant }].slice(-3))
+    setTimeout(() => setNotices((xs) => xs.filter((n) => n.id !== id)), 3000)
+  }
 
   useEffect(() => {
     const iframe = iframeRef.current
@@ -109,6 +134,16 @@ export default function Runner({ apiBase, token, pkg }) {
           return
         }
 
+        if (msg.type === 'notify') {
+          pushNotice({
+            message: msg.payload?.message,
+            variant: msg.payload?.variant,
+          })
+          setLog((l) => [`notify ← ${JSON.stringify(msg.payload)}`, ...l].slice(0, 8))
+          await reply(true, { ok: true })
+          return
+        }
+
         throw new Error(`Unknown RPC type: ${msg.type}`)
       } catch (e) {
         await reply(false, e)
@@ -121,14 +156,22 @@ export default function Runner({ apiBase, token, pkg }) {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
-      <div style={{ border: '1px solid #ddd', borderRadius: 12, overflow: 'hidden' }}>
+      <div style={{ border: '1px solid #ddd', borderRadius: 12, overflow: 'hidden', position: 'relative' }}>
+        {/* !!!!!Don't allow any powers other than allow-scripts without serious thought!!!!!! */}
         <iframe
           ref={iframeRef}
           title="Learning app"
-          sandbox="allow-scripts"
+          sandbox="allow-scripts"  
           srcDoc={srcDoc}
           style={{ width: '100%', height: 420, border: 0 }}
         />
+        <div style={{ position: 'absolute', top: 12, right: 12, width: 360, display: 'grid', gap: 8 }}>
+          {notices.map((n) => (
+            <Alert key={n.id} variant={n.variant} margin="0">
+              {n.message}
+            </Alert>
+          ))}
+        </div>
       </div>
       <div style={{ background: '#f6f6f6', borderRadius: 12, padding: 12 }}>
         <div style={{ fontWeight: 600, marginBottom: 8 }}>SDK log</div>

@@ -105,7 +105,7 @@ class AppController extends Controller
       <p style="opacity:.7">Try saving, then refresh the page and run again.</p>
     `;
     document.getElementById('inc').onclick = () => { state.count++; render(); };
-    document.getElementById('save').onclick = async () => { await sdk.setState(state); alert('Saved'); };
+    document.getElementById('save').onclick = async () => { await sdk.setState(state); await sdk.notify({ variant: 'success', message: 'Saved' }); };
     document.getElementById('reset').onclick = async () => { state.count = 0; await sdk.setState(state); render(); };
   }
 
