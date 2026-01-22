@@ -19,3 +19,7 @@ This repo is a proof-of-concept for:
 
 ```bash
 docker compose up --build
+
+Loads frontend on 5173, backend on 8000.
+
+Current prototype flow: “paste Tool Support JWT → bootstrap → local token → load dummy package → iframe runner → save/resume”.
