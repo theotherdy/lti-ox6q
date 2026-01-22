@@ -14,12 +14,6 @@ set_env() {
   fi
 }
 
-# 1) Create Laravel app on first run (in the mounted volume)
-#if [ ! -f artisan ]; then
-#  echo "[backend] No Laravel project found. Creating a fresh Laravel app."
-#  composer create-project laravel/laravel . --no-interaction --prefer-dist
-#fi
-
 # 2) Ensure .env exists
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -59,19 +53,6 @@ if [ ! -d vendor ]; then
   echo "[backend] Installing composer dependencies..."
   composer install --no-interaction
 fi
-
-# Install JWT lib if missing
-#if ! grep -q 'firebase/php-jwt' composer.json; then
-#  echo "[backend] Adding firebase/php-jwt..."
-#  composer require firebase/php-jwt:^6.10 --no-interaction
-#fi
-
-# 5) Install POC overrides once
-#if [ ! -f .poc_installed ]; then
-#  echo "[backend] Installing POC override files..."
-#  cp -R /opt/poc/. /var/www/html/
-#  touch .poc_installed
-#fi
 
 # 6) App key, migrations
 if ! grep -q '^APP_KEY=' .env || grep -q '^APP_KEY=$' .env; then

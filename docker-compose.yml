@@ -16,7 +16,7 @@ services:
       TOOLSUPPORT_JWKS_URL: ""
       TOOLSUPPORT_JWT_ISS: ""
       TOOLSUPPORT_JWT_AUD: ""
-      TOOLSUPPORT_SKIP_SIGNATURE: "true"
+      TOOLSUPPORT_SKIP_SIGNATURE: "true" #REMOVE FOR PROD!
       # Local stateless API auth
       LOCAL_JWT_SECRET: "change-me-in-compose"
     #healthcheck:

@@ -1,15 +1,20 @@
-*.log
-.DS_Store
-.env
-.env.backup
-.env.production
-.phpactor.json
-.phpunit.result.cache
+# Backend (Laravel)
+backend/app/.env
+backend/app/.env.backup
+backend/app/.env.production
+backend/app/.phpactor.json
+backend/app/.phpunit.result.cache
 backend/app/node_modules
 backend/app/public/build
 backend/app/public/hot
-backend/app/public/storage
-backend/app/storage/*.key
-backend/app/storage/pail
+backend/app/storage
+backend/app/bootstrap/cache
+backend/app/database/*.sqlite
 backend/app/vendor
+# Frontend
 frontend/node_modules/
+frontend/dist
+frontend/.vite
+# General
+.DS_Store
+*.log
