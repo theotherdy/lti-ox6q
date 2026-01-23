@@ -20,4 +20,5 @@ Route::middleware([LocalJwtAuth::class])->group(function () {
     Route::get('/apps/{appId}/package', [AppController::class, 'package']);
     Route::get('/apps/{appId}/state', [AppController::class, 'getState']);
     Route::put('/apps/{appId}/state', [AppController::class, 'setState']);
+    Route::post('/apps/generate', [GenerateAppController::class, 'generate'])
 });
