@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert } from '@instructure/ui'
 
+
+
 function jsonHeaders(token) {
   const h = { 'Content-Type': 'application/json' }
   if (token) h.Authorization = `Bearer ${token}`
@@ -75,7 +77,10 @@ export default function Runner({ apiBase, token, pkg }) {
   const [log, setLog] = useState([])
   const [notices, setNotices] = useState([]) //used to display notifications from iFramed app via callParent('notify', payload);
 
-  const srcDoc = useMemo(() => buildSrcDoc(pkg), [pkg])
+  const srcDoc = useMemo(() => {
+    if (!pkg) return null  //pkg will be null when first loads
+    return buildSrcDoc(pkg)
+  }, [pkg])
 
   //helper for pushing notices from iFramed app into Alert in this container app
   function pushNotice({ message, variant }) {
@@ -153,6 +158,30 @@ export default function Runner({ apiBase, token, pkg }) {
     window.addEventListener('message', handleRpc)
     return () => window.removeEventListener('message', handleRpc)
   }, [apiBase, pkg, token])
+
+  if (!token) {
+    return (
+      <div style={{ padding: 24, opacity: 0.7 }}>
+        <p>
+          Not authenticated yet.
+        </p>
+        <p>
+          Open the <b>Auth / Bootstrap</b> tab to initialise a session.
+        </p>
+      </div>
+    )
+  }
+
+  if (!pkg) {
+    return (
+      <div style={{ padding: 24, opacity: 0.7 }}>
+        <p>No application loaded yet.</p>
+        <p>
+          Load the dummy app or generate one to begin.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
