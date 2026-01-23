@@ -13,6 +13,9 @@ export default function App() {
 
   const [appPackage, setAppPackage] = useState(null)
   const [status, setStatus] = useState(null)
+  //for the LLM authoring
+  const [prompt, setPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
 
   function setToken(token) {
     if (token) {
@@ -51,6 +54,37 @@ export default function App() {
     }
   }
 
+  async function generateApp() {
+    if (!prompt.trim() || !accessToken) return
+
+    setGenerating(true)
+    setStatus('Generating app…')
+
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ prompt }),
+      })
+
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setStatus(body.error || 'Generation failed')
+        return
+      }
+
+      setAppPackage(body)
+      setStatus('Generated app loaded')
+    } catch (e) {
+      setStatus(String(e))
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   useEffect(() => {
     // Auto-load app when we have a token but no package yet
     if (!accessToken) return
@@ -81,12 +115,33 @@ export default function App() {
       {/* Application tab */}
       {activeTab === 'app' && (
         <>
+          {/* LLM authoring UI */}
+          <div style={{ marginBottom: 16 }}>
+            <textarea
+              rows={3}
+              placeholder="Describe the learning activity you want…"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              style={{ width: '100%', resize: 'vertical' }}
+            />
+            <div style={{ marginTop: 8 }}>
+              <button
+                onClick={generateApp}
+                disabled={generating || !accessToken}
+              >
+                {generating ? 'Generating…' : 'Generate app'}
+              </button>
+            </div>
+          </div>
+
+          {/* Status */}
           {status && (
             <div style={{ marginBottom: 12, opacity: 0.8 }}>
               {status}
             </div>
           )}
 
+          {/* App runner */}
           <Runner
             apiBase={API_BASE}
             token={accessToken}

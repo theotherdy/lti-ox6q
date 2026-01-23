@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthBootstrapController;
 use App\Http\Controllers\AppController;
+use App\Http\Controllers\GenerateAppController;
 use App\Http\Middleware\LocalJwtAuth;
 
 Route::get('/health', function () {
@@ -20,5 +21,5 @@ Route::middleware([LocalJwtAuth::class])->group(function () {
     Route::get('/apps/{appId}/package', [AppController::class, 'package']);
     Route::get('/apps/{appId}/state', [AppController::class, 'getState']);
     Route::put('/apps/{appId}/state', [AppController::class, 'setState']);
-    Route::post('/apps/generate', [GenerateAppController::class, 'generate'])
+    Route::post('/apps/generate', [GenerateAppController::class, 'generate']);
 });
