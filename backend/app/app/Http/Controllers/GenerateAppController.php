@@ -78,7 +78,7 @@ Rules:
 - Do NOT use external libraries.
 - Do NOT use fetch or network access.
 - Do NOT rely on native form submission.
-
+- Do NOT use <form>.
 - Never set a form action or submit data via the browser.
 - Treat buttons as JavaScript triggers, not HTML submit actions.
 - Mount into an element with id="app".
