@@ -1,4 +1,4 @@
-FROM node:20-alpine 
+FROM node:20-bookworm-slim
 # FROM node:22-alpine on Windows, not on Mac
 
 WORKDIR /app

@@ -32,6 +32,11 @@ fi
 set_env DB_CONNECTION sqlite
 set_env DB_DATABASE /var/www/html/database/database.sqlite
 
+# Force non-database stores for local dev
+set_env CACHE_STORE file
+set_env SESSION_DRIVER file
+set_env QUEUE_CONNECTION sync
+
 # App + CORS config
 #: "${APP_URL:=http://localhost:8000}"
 #: "${FRONTEND_ORIGIN:=http://localhost:5173}"
@@ -63,7 +68,8 @@ if ! grep -q '^APP_KEY=' .env || grep -q '^APP_KEY=$' .env; then
   php artisan key:generate --force
 fi
 #php artisan key:generate --force
-php artisan optimize:clear
+#php artisan optimize:clear
+php artisan config:clear
 
 if [ "${RUN_MIGRATIONS:-1}" = "1" ]; then
   php artisan migrate --force
