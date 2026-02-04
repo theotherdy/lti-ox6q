@@ -4,15 +4,43 @@ import AuthDebug from './components/AuthDebug'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
+function jsonHeaders(token) {
+  const h = { 'Content-Type': 'application/json' }
+  if (token) h.Authorization = `Bearer ${token}`
+  return h
+}
+
+function parseJwt(token) {
+  if (!token || typeof token !== 'string') return null
+  const parts = token.split('.')
+  if (parts.length < 2) return null
+  try {
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const json = atob(payload.padEnd(payload.length + (4 - (payload.length % 4)) % 4, '='))
+    return JSON.parse(json)
+  } catch {
+    return null
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('app') // 'app' | 'auth'
   const [accessToken, setAccessToken] = useState(
     () => sessionStorage.getItem('accessToken')
   )
-  const [bootstrapInfo, setBootstrapInfo] = useState(null)
+  const [bootstrapInfo, setBootstrapInfo] = useState(() => {
+    const raw = sessionStorage.getItem('bootstrapInfo')
+    if (!raw) return null
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  })
 
   const [appPackage, setAppPackage] = useState(null)
   const [status, setStatus] = useState(null)
+  const [clearing, setClearing] = useState(false)
   //for the LLM authoring
   const [prompt, setPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
@@ -27,11 +55,11 @@ export default function App() {
     }
   }
 
-  async function loadDummyApp() {
+  async function loadAppById(appId) {
     if (!accessToken) return
-    setStatus('Loading dummy app package...')
+    setStatus(`Loading app ${appId}...`)
     try {
-      const res = await fetch(`${API_BASE}/api/apps/1/package`, {
+      const res = await fetch(`${API_BASE}/api/apps/${appId}/package`, {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
@@ -48,7 +76,9 @@ export default function App() {
         return
       }
       setAppPackage(body)
-      setStatus('Dummy app loaded')
+      setAppPackage(body)
+      sessionStorage.setItem('lastAppId', String(body.id))
+      setStatus(`App ${body.id} loaded`)
     } catch (e) {
       setStatus(`Load error: ${String(e)}`)
     }
@@ -77,7 +107,9 @@ export default function App() {
       }
 
       setAppPackage(body)
-      setStatus('Generated app loaded')
+      setBootstrapInfo((prev) => (prev ? { ...prev, app_id: body.id } : prev))
+      sessionStorage.setItem('lastAppId', String(body.id))
+      setStatus(`Generated app ${body.id} loaded`)
     } catch (e) {
       setStatus(String(e))
     } finally {
@@ -86,12 +118,78 @@ export default function App() {
   }
 
   useEffect(() => {
-    // Auto-load app when we have a token but no package yet
+    // Auto-load mapped app (LTI) or last generated app (local dev)
     if (!accessToken) return
     if (appPackage) return
 
-    loadDummyApp()
-  }, [accessToken, appPackage])
+    const mappedAppId = bootstrapInfo?.app_id
+    if (mappedAppId) {
+      loadAppById(mappedAppId)
+      return
+    }
+
+    const lastAppId = sessionStorage.getItem('lastAppId')
+    if (!lastAppId) return
+    loadAppById(lastAppId)
+  }, [accessToken, appPackage, bootstrapInfo])
+
+  useEffect(() => {
+    if (bootstrapInfo) {
+      sessionStorage.setItem('bootstrapInfo', JSON.stringify(bootstrapInfo))
+      return
+    }
+    sessionStorage.removeItem('bootstrapInfo')
+  }, [bootstrapInfo])
+
+  useEffect(() => {
+    if (!accessToken) return
+    if (bootstrapInfo?.lti) return
+    const payload = parseJwt(accessToken)
+    if (!payload || !payload.lti) return
+    setBootstrapInfo((prev) => (prev ? { ...prev, lti: payload.lti } : { lti: payload.lti }))
+  }, [accessToken, bootstrapInfo])
+
+  async function clearApp() {
+    if (!accessToken) return
+    setClearing(true)
+    setStatus('Clearing app mapping...')
+
+    try {
+      const tokenLti = parseJwt(accessToken)?.lti
+      const lti = bootstrapInfo?.lti || tokenLti
+      const hasMapping = Boolean(lti?.issuer && lti?.deployment_id && lti?.resource_link_id)
+      if (hasMapping) {
+        const res = await fetch(`${API_BASE}/api/apps/mapping`, {
+          method: 'DELETE',
+          headers: jsonHeaders(accessToken),
+        })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          setStatus(body.error || 'Failed to clear mapping')
+          return
+        }
+        if (typeof body.deleted === 'number' && body.deleted === 0) {
+          setStatus('No mapping row found to delete (cleared local selection).')
+        }
+      } else {
+        setStatus('No LTI mapping in token; cleared local selection only.')
+      }
+
+      setAppPackage(null)
+      setBootstrapInfo((prev) => (prev ? { ...prev, app_id: null } : prev))
+      sessionStorage.removeItem('lastAppId')
+      if (!hasMapping) {
+        return
+      }
+      if (!status || status.startsWith('Clearing')) {
+        setStatus('Cleared app selection')
+      }
+    } catch (e) {
+      setStatus(`Clear error: ${String(e)}`)
+    } finally {
+      setClearing(false)
+    }
+  }
 
   return (
     <div style={{ padding: 16 }}>
@@ -124,12 +222,15 @@ export default function App() {
               onChange={(e) => setPrompt(e.target.value)}
               style={{ width: '100%', resize: 'vertical' }}
             />
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
               <button
                 onClick={generateApp}
                 disabled={generating || !accessToken}
               >
                 {generating ? 'Generating…' : 'Generate app'}
+              </button>
+              <button onClick={clearApp} disabled={!appPackage || clearing}>
+                Clear app
               </button>
             </div>
           </div>

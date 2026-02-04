@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\DB;
 
 class GenerateAppController extends Controller
 {
@@ -173,9 +174,44 @@ USR;
         }
 
 
+        // Persist the generated app so it has a real numeric ID
+        $appId = DB::table('apps')->insertGetId([
+            'title' => $package['title'] ?? 'Generated app',
+            'html' => $package['html'] ?? "<div id='app'></div>",
+            'css' => $package['css'] ?? '',
+            'js' => $package['js'] ?? '',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // If we have LTI context, map this app to the resource link
+        $auth = $request->attributes->get('auth');
+        $lti = is_array($auth) ? ($auth['lti'] ?? null) : null;
+        $issuer = is_array($lti) ? ($lti['issuer'] ?? null) : null;
+        $deploymentId = is_array($lti) ? ($lti['deployment_id'] ?? null) : null;
+        $resourceLinkId = is_array($lti) ? ($lti['resource_link_id'] ?? null) : null;
+
+        if (is_string($issuer) && $issuer !== '' &&
+            is_string($deploymentId) && $deploymentId !== '' &&
+            is_string($resourceLinkId) && $resourceLinkId !== '') {
+            $now = now();
+            DB::table('resource_links')->updateOrInsert(
+                [
+                    'issuer' => $issuer,
+                    'deployment_id' => $deploymentId,
+                    'resource_link_id' => $resourceLinkId,
+                ],
+                [
+                    'app_id' => $appId,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]
+            );
+        }
+
         // Minimal normalisation
         return response()->json([
-            'id' => 'generated',
+            'id' => $appId,
             'title' => $package['title'] ?? 'Generated app',
             'html' => $package['html'] ?? "<div id='app'></div>",
             'css' => $package['css'] ?? '',

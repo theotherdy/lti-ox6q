@@ -18,8 +18,9 @@ Route::options('/{any}', function () {
 Route::post('/auth/bootstrap', [AuthBootstrapController::class, 'bootstrap']);
 
 Route::middleware([LocalJwtAuth::class])->group(function () {
-    Route::get('/apps/{appId}/package', [AppController::class, 'package']);
-    Route::get('/apps/{appId}/state', [AppController::class, 'getState']);
-    Route::put('/apps/{appId}/state', [AppController::class, 'setState']);
+    Route::get('/apps/{appId}/package', [AppController::class, 'package'])->whereNumber('appId');
+    Route::get('/apps/{appId}/state', [AppController::class, 'getState'])->whereNumber('appId');
+    Route::put('/apps/{appId}/state', [AppController::class, 'setState'])->whereNumber('appId');
+    Route::delete('/apps/mapping', [AppController::class, 'clearMapping']);
     Route::post('/apps/generate', [GenerateAppController::class, 'generate']);
 });
