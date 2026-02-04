@@ -48,10 +48,11 @@ class AppController extends Controller
         $appId = (int) $appId;
 
         $sub = $request->attributes->get('auth_sub');
+        $ltiUserId = $this->getLtiUserId($sub);
 
         $row = DB::table('app_states')
             ->where('app_id', $appId)
-            ->where('user_sub', $sub)
+            ->where('lti_user_id', $ltiUserId)
             ->first();
 
         if (!$row) {
@@ -70,6 +71,7 @@ class AppController extends Controller
         $appId = (int) $appId;
 
         $sub = $request->attributes->get('auth_sub');
+        $ltiUserId = $this->getLtiUserId($sub);
 
         $request->validate([
             'state' => ['required'],
@@ -79,13 +81,13 @@ class AppController extends Controller
 
         $exists = DB::table('app_states')
             ->where('app_id', $appId)
-            ->where('user_sub', $sub)
+            ->where('lti_user_id', $ltiUserId)
             ->exists();
 
         if ($exists) {
             DB::table('app_states')
                 ->where('app_id', $appId)
-                ->where('user_sub', $sub)
+                ->where('lti_user_id', $ltiUserId)
                 ->update([
                     'state_json' => $stateJson,
                     'updated_at' => now(),
@@ -93,7 +95,7 @@ class AppController extends Controller
         } else {
             DB::table('app_states')->insert([
                 'app_id' => $appId,
-                'user_sub' => $sub,
+                'lti_user_id' => $ltiUserId,
                 'state_json' => $stateJson,
                 'created_at' => now(),
                 'updated_at' => now(),
@@ -163,5 +165,24 @@ class AppController extends Controller
   render();
 })();
 JS;
+    }
+
+    private function getLtiUserId(string $sub): int
+    {
+        $now = now();
+
+        DB::table('lti_users')->insertOrIgnore([
+            'sub' => $sub,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        DB::table('lti_users')
+            ->where('sub', $sub)
+            ->update(['updated_at' => $now]);
+
+        $userId = DB::table('lti_users')->where('sub', $sub)->value('id');
+
+        return (int) $userId;
     }
 }
