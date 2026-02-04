@@ -15,11 +15,11 @@ class AppController extends Controller
         }
         $appId = (int) $appId;
 
-        $row = DB::table('learning_apps')->where('id', $appId)->first();
+        $row = DB::table('apps')->where('id', $appId)->first();
 
         if (!$row) {
             // Create a simple dummy app the first time it's requested.
-            DB::table('learning_apps')->insert([
+            DB::table('apps')->insert([
                 'id' => $appId,
                 'title' => 'Counter with resume',
                 'html' => "<div id='app'></div>",
@@ -28,7 +28,7 @@ class AppController extends Controller
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
-            $row = DB::table('learning_apps')->where('id', $appId)->first();
+            $row = DB::table('apps')->where('id', $appId)->first();
         }
 
         return response()->json([
@@ -125,7 +125,7 @@ class AppController extends Controller
             return response()->json(['error' => 'Missing LTI context for mapping.'], 400);
         }
 
-        $deleted = DB::table('resource_link_apps')
+        $deleted = DB::table('resource_links')
             ->where('issuer', $issuer)
             ->where('deployment_id', $deploymentId)
             ->where('resource_link_id', $resourceLinkId)

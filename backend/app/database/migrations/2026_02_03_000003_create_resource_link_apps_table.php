@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration {
     public function up(): void
     {
-        Schema::create('resource_link_apps', function (Blueprint $table) {
+        Schema::create('resource_links', function (Blueprint $table) {
             $table->id();
             $table->string('issuer');
             $table->string('deployment_id');
@@ -15,14 +15,14 @@ return new class extends Migration {
             $table->unsignedBigInteger('app_id');
             $table->timestamps();
 
-            $table->unique(['issuer', 'deployment_id', 'resource_link_id'], 'resource_link_apps_unique');
+            $table->unique(['issuer', 'deployment_id', 'resource_link_id'], 'resource_links_unique');
             $table->index('app_id');
-            $table->foreign('app_id')->references('id')->on('learning_apps')->onDelete('cascade');
+            $table->foreign('app_id')->references('id')->on('apps')->onDelete('cascade');
         });
     }
 
     public function down(): void
     {
-        Schema::dropIfExists('resource_link_apps');
+        Schema::dropIfExists('resource_links');
     }
 };
