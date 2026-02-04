@@ -87,29 +87,36 @@ export default function App() {
   async function generateApp() {
     if (!prompt.trim() || !accessToken) return
 
+    const isRevising = appPackage?.id
     setGenerating(true)
-    setStatus('Generating app…')
+    setStatus(isRevising ? 'Revising app…' : 'Generating app…')
 
     try {
+      const requestBody = { prompt }
+      if (isRevising) {
+        requestBody.app_id = appPackage.id
+      }
+
       const res = await fetch(`${API_BASE}/api/apps/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify(requestBody),
       })
 
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setStatus(body.error || 'Generation failed')
+        setStatus(body.error || (isRevising ? 'Revision failed' : 'Generation failed'))
         return
       }
 
       setAppPackage(body)
       setBootstrapInfo((prev) => (prev ? { ...prev, app_id: body.id } : prev))
       sessionStorage.setItem('lastAppId', String(body.id))
-      setStatus(`Generated app ${body.id} loaded`)
+      setStatus(isRevising ? `App revised: ${body.title}` : `App generated: ${body.title}`)
+      setPrompt('') // Clear prompt after successful generation/revision
     } catch (e) {
       setStatus(String(e))
     } finally {
@@ -176,6 +183,7 @@ export default function App() {
       }
 
       setAppPackage(null)
+      setPrompt('') // Clear prompt for fresh start
       setBootstrapInfo((prev) => (prev ? { ...prev, app_id: null } : prev))
       sessionStorage.removeItem('lastAppId')
       if (!hasMapping) {
@@ -217,21 +225,31 @@ export default function App() {
           <div style={{ marginBottom: 16 }}>
             <textarea
               rows={3}
-              placeholder="Describe the learning activity you want…"
+              placeholder={
+                appPackage
+                  ? "What changes would you like to make?…"
+                  : "Describe the learning activity you want…"
+              }
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              disabled={generating}
               style={{ width: '100%', resize: 'vertical' }}
             />
             <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
               <button
                 onClick={generateApp}
-                disabled={generating || !accessToken}
+                disabled={generating || !prompt.trim() || !accessToken}
               >
-                {generating ? 'Generating…' : 'Generate app'}
+                {generating
+                  ? (appPackage ? 'Revising…' : 'Generating…')
+                  : (appPackage ? 'Revise app' : 'Generate app')
+                }
               </button>
-              <button onClick={clearApp} disabled={!appPackage || clearing}>
-                Clear app
-              </button>
+              {appPackage && (
+                <button onClick={clearApp} disabled={clearing || generating}>
+                  {clearing ? 'Clearing…' : 'Start Over'}
+                </button>
+              )}
             </div>
           </div>
 
