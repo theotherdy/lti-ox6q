@@ -8,7 +8,7 @@ services:
     volumes:
       - ./backend/app:/var/www/html
     environment:
-      RUN_MIGRATIONS: "1"
+      RUN_MIGRATIONS: "0"
       CACHE_DRIVER: file
   frontend:
     platform: linux/amd64 # For compatibility across windows and Mac
