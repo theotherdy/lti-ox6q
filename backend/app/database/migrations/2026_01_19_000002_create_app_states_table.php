@@ -15,7 +15,7 @@ return new class extends Migration {
             $table->timestamps();
 
             $table->unique(['app_id', 'user_sub']);
-            $table->foreign('app_id')->references('id')->on('learning_apps')->onDelete('cascade');
+            $table->foreign('app_id')->references('id')->on('apps')->onDelete('cascade');
         });
     }
 

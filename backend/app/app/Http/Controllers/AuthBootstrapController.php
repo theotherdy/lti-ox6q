@@ -75,7 +75,7 @@ class AuthBootstrapController extends Controller
         if (is_string($issuer) && $issuer !== '' &&
             is_string($deploymentId) && $deploymentId !== '' &&
             is_string($resourceLinkId) && $resourceLinkId !== '') {
-            $row = DB::table('resource_link_apps')
+            $row = DB::table('resource_links')
                 ->where('issuer', $issuer)
                 ->where('deployment_id', $deploymentId)
                 ->where('resource_link_id', $resourceLinkId)
