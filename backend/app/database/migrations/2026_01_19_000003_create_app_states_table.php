@@ -10,12 +10,13 @@ return new class extends Migration {
         Schema::create('app_states', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('app_id');
-            $table->string('user_sub');
+            $table->unsignedBigInteger('lti_user_id');
             $table->longText('state_json');
             $table->timestamps();
 
-            $table->unique(['app_id', 'user_sub']);
+            $table->unique(['app_id', 'lti_user_id']);
             $table->foreign('app_id')->references('id')->on('apps')->onDelete('cascade');
+            $table->foreign('lti_user_id')->references('id')->on('lti_users')->onDelete('cascade');
         });
     }
 

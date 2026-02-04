@@ -18,17 +18,7 @@ class AppController extends Controller
         $row = DB::table('apps')->where('id', $appId)->first();
 
         if (!$row) {
-            // Create a simple dummy app the first time it's requested.
-            DB::table('apps')->insert([
-                'id' => $appId,
-                'title' => 'Counter with resume',
-                'html' => "<div id='app'></div>",
-                'css' => "body{font-family:system-ui;padding:16px} button{font-size:16px;padding:8px 12px;margin-right:8px}",
-                'js' => $this->defaultJs(),
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-            $row = DB::table('apps')->where('id', $appId)->first();
+            return response()->json(['error' => 'App not found.'], 404);
         }
 
         return response()->json([
@@ -138,33 +128,6 @@ class AppController extends Controller
         ]);
 
         return response()->json(['ok' => true, 'deleted' => $deleted]);
-    }
-
-    private function defaultJs(): string
-    {
-        return <<<'JS'
-(async function(){
-  const root = document.getElementById('app');
-  const saved = await sdk.getState();
-  const state = saved || { count: 0 };
-
-  function render(){
-    root.innerHTML = `
-      <h2>Counter with resume</h2>
-      <p>Count: <b>${state.count}</b></p>
-      <button id="inc">+1</button>
-      <button id="save">Save</button>
-      <button id="reset">Reset</button>
-      <p style="opacity:.7">Try saving, then refresh the page and run again.</p>
-    `;
-    document.getElementById('inc').onclick = () => { state.count++; render(); };
-    document.getElementById('save').onclick = async () => { await sdk.setState(state); await sdk.notify({ variant: 'success', message: 'Saved' }); };
-    document.getElementById('reset').onclick = async () => { state.count = 0; await sdk.setState(state); render(); };
-  }
-
-  render();
-})();
-JS;
     }
 
     private function getLtiUserId(string $sub): int
