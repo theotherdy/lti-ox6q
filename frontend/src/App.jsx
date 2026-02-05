@@ -4,12 +4,15 @@ import AuthDebug from './components/AuthDebug'
 import { View } from '@instructure/ui-view'
 import { Flex } from '@instructure/ui-flex'
 import { Button } from '@instructure/ui-buttons'
+import { IconButton } from '@instructure/ui-buttons'
 import { TextArea } from '@instructure/ui-text-area'
 import { Alert } from '@instructure/ui-alerts'
 import { DrawerLayout } from '@instructure/ui-drawer-layout'
 import { Tabs } from '@instructure/ui-tabs'
 import { Heading } from '@instructure/ui-heading'
 import { Text } from '@instructure/ui-text'
+import { IconHamburgerLine } from '@instructure/ui-icons'
+import { IconXLine } from '@instructure/ui-icons'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -289,7 +292,7 @@ export default function App() {
   }
 
   return (
-    <DrawerLayout>
+    <DrawerLayout minHeight="100vh">
       <DrawerLayout.Tray
         label="Controls"
         open={isTrayOpen}
@@ -389,6 +392,14 @@ export default function App() {
 
       <DrawerLayout.Content label="App Preview">
         <View as="div" padding="medium">
+          <Flex margin="0 0 small 0">
+            <Button
+              onClick={() => setIsTrayOpen(!isTrayOpen)}
+              size="small"
+            >
+              {isTrayOpen ? 'Hide Controls' : 'Show Controls'}
+            </Button>
+          </Flex>
           <Runner
             apiBase={API_BASE}
             token={accessToken}

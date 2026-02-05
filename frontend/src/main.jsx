@@ -1,13 +1,13 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
-import { theme as canvasTheme } from '@instructure/canvas-theme'
-import { EmotionThemeProvider } from '@instructure/emotion'
+import { canvas } from '@instructure/ui-themes'
+import { InstUISettingsProvider } from '@instructure/emotion'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <EmotionThemeProvider theme={canvasTheme}>
+    <InstUISettingsProvider theme={canvas}>
       <App />
-    </EmotionThemeProvider>
+    </InstUISettingsProvider>
   </React.StrictMode>
 )

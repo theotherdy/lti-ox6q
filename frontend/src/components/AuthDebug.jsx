@@ -36,7 +36,7 @@ export default function AuthDebug({
   }
 
   return (
-    <div style={{ maxWidth: 800 }}>
+    <div>
       <h2>Auth / Bootstrap (Debug)</h2>
 
       <textarea
