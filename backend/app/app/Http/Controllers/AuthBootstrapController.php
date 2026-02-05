@@ -21,7 +21,28 @@ class AuthBootstrapController extends Controller
         $verifier = app(ToolSupportJwtVerifier::class);
         $claims = $verifier->verify($jwt);
 
-        // Replay protection (bootstrap is single-use)
+        // Validate LTI message type
+        $messageType = $claims['https://purl.imsglobal.org/spec/lti/claim/message_type'] ?? null;
+        if ($messageType !== 'LtiResourceLinkRequest' && $messageType !== 'LtiDeepLinkingRequest') {
+            return response()->json([
+                'error' => 'Invalid or unsupported LTI message type.'
+            ], 400);
+        }
+
+        // Nonce validation (prevents replay attacks)
+        $nonce = $claims['nonce'] ?? null;
+        if (!is_string($nonce) || $nonce === '') {
+            return response()->json(['error' => 'Missing nonce claim.'], 400);
+        }
+
+        $nonceKey = 'nonce:' . hash('sha256', $nonce);
+        if (!Cache::add($nonceKey, 1, now()->addMinutes(10))) {
+            return response()->json([
+                'error' => 'Nonce has already been used (replay attack detected).'
+            ], 409);
+        }
+
+        // Additional replay protection using jti/hash (defense in depth)
         $replayKey = 'bootstrap:';
         if (isset($claims['jti']) && is_string($claims['jti']) && $claims['jti'] !== '') {
             $replayKey .= 'jti:' . $claims['jti'];
@@ -52,7 +73,7 @@ class AuthBootstrapController extends Controller
         $contextId = is_array($context) ? ($context['id'] ?? null) : null;
 
         $now = time();
-        $expiresIn = 30 * 60;
+        $expiresIn = (int) env('LOCAL_JWT_EXPIRES_IN', 1800);
 
         $localPayload = [
             'iss' => config('app.url'),

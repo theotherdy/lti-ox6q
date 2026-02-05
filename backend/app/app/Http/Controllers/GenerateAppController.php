@@ -9,7 +9,116 @@ use Illuminate\Support\Facades\Log;
 
 class GenerateAppController extends Controller
 {
-    
+    /**
+     * Call the LLM and parse the JSON response
+     *
+     * @param array $messages The messages to send to the LLM
+     * @return array{package: array|null, error: string|null, raw: string|null}
+     */
+    private function callLLM(array $messages): array
+    {
+        $startTime = microtime(true);
+
+        try {
+            /** @var \Illuminate\Http\Client\Response $res */
+            $res = Http::withToken(config('services.openai.key'))
+                ->timeout(90)
+                ->retry(2, 1000)
+                ->post('https://api.openai.com/v1/chat/completions', [
+                    'model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
+                    'temperature' => (float) env('OPENAI_TEMPERATURE', 0.3),
+                    'messages' => $messages,
+                ]);
+
+            $duration = microtime(true) - $startTime;
+
+            if ($res->status() >= 400) {
+                Log::error('OpenAI API request failed', [
+                    'status' => $res->status(),
+                    'body' => $res->body(),
+                    'duration' => round($duration, 2) . 's',
+                ]);
+                return ['package' => null, 'error' => 'Failed to generate app. Please try again.', 'raw' => null];
+            }
+
+            $responseData = $res->json();
+
+            Log::info('OpenAI API request succeeded', [
+                'duration' => round($duration, 2) . 's',
+                'tokens_used' => $responseData['usage']['total_tokens'] ?? null,
+            ]);
+
+            $text = $responseData['choices'][0]['message']['content'] ?? '';
+
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            $duration = microtime(true) - $startTime;
+            Log::error('OpenAI API connection error', [
+                'error' => $e->getMessage(),
+                'duration' => round($duration, 2) . 's',
+            ]);
+            return ['package' => null, 'error' => 'Unable to connect to AI service. Please check your connection and try again.', 'raw' => null];
+
+        } catch (\Exception $e) {
+            $duration = microtime(true) - $startTime;
+            Log::error('Unexpected error during OpenAI API request', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'duration' => round($duration, 2) . 's',
+            ]);
+            return ['package' => null, 'error' => 'An unexpected error occurred. Please try again.', 'raw' => null];
+        }
+
+        Log::debug('LLM raw response', ['content' => $text]);
+
+        if (!$text) {
+            return ['package' => null, 'error' => 'OpenAI returned no content', 'raw' => null];
+        }
+
+        // Parse the JSON response
+        $package = $this->parseJsonResponse($text);
+
+        if (!$package) {
+            Log::warning('Failed to parse LLM JSON', ['raw' => $text]);
+            return ['package' => null, 'error' => 'LLM output could not be parsed as JSON', 'raw' => $text];
+        }
+
+        return ['package' => $package, 'error' => null, 'raw' => $text];
+    }
+
+    /**
+     * Parse JSON from LLM response, handling markdown fences
+     */
+    private function parseJsonResponse(string $text): ?array
+    {
+        // 1) Try direct decode first
+        $decoded = json_decode($text, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        // 2) Strip Markdown fences if present
+        $clean = trim($text);
+        $clean = preg_replace('/^```(?:json)?/i', '', $clean);
+        $clean = preg_replace('/```$/', '', $clean);
+        $clean = trim($clean);
+
+        // 3) Try decode again
+        $decoded = json_decode($clean, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        // 4) Last resort: extract first JSON object
+        if (preg_match('/\{.*\}/s', $clean, $m)) {
+            $decoded = json_decode($m[0], true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        return null;
+    }
+
     //violations detrerministrically chceked for
     private function validatePackage(array $pkg): array
     {
@@ -138,137 +247,103 @@ Return JSON only.
 USR;
         }
 
-        // Log the API request attempt
+        // Log the API request attempt with full details
         Log::info('OpenAI API request initiated', [
             'prompt_length' => strlen($request->prompt),
-            'model' => 'gpt-4.1-mini',
+            'model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
+            'temperature' => env('OPENAI_TEMPERATURE', 0.3),
+            'is_revision' => (bool)$existingApp,
         ]);
 
-        $startTime = microtime(true);
-
-        try {
-            /** @var \Illuminate\Http\Client\Response $res */
-            $res = Http::withToken(config('services.openai.key'))
-                ->timeout(90) // Increase timeout to 90 seconds
-                ->retry(2, 1000) // Retry twice with 1 second delay between attempts
-                ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4.1-mini',
-                    'temperature' => 0.4,
-                    'messages' => [
-                        ['role' => 'system', 'content' => $system],
-                        ['role' => 'user', 'content' => $user],
-                    ],
-                ]);
-
-            $duration = microtime(true) - $startTime;
-
-            if ($res->status() >= 400) {
-                Log::error('OpenAI API request failed', [
-                    'status' => $res->status(),
-                    'body' => $res->body(),
-                    'duration' => round($duration, 2) . 's',
-                ]);
-
-                return response()->json([
-                    'error' => 'Failed to generate app. Please try again.',
-                ], 500);
-            }
-
-            $responseData = $res->json();
-
-            Log::info('OpenAI API request succeeded', [
-                'duration' => round($duration, 2) . 's',
-                'tokens_used' => $responseData['usage']['total_tokens'] ?? null,
-            ]);
-
-            $text = $responseData['choices'][0]['message']['content'] ?? '';
-
-        } catch (\Illuminate\Http\Client\ConnectionException $e) {
-            $duration = microtime(true) - $startTime;
-
-            Log::error('OpenAI API connection error', [
-                'error' => $e->getMessage(),
-                'duration' => round($duration, 2) . 's',
-                'prompt_length' => strlen($request->prompt),
-            ]);
-
-            return response()->json([
-                'error' => 'Unable to connect to AI service. Please check your connection and try again.',
-            ], 503);
-        } catch (\Exception $e) {
-            $duration = microtime(true) - $startTime;
-
-            Log::error('Unexpected error during OpenAI API request', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-                'duration' => round($duration, 2) . 's',
-            ]);
-
-            return response()->json([
-                'error' => 'An unexpected error occurred. Please try again.',
-            ], 500);
-        }
-
-        Log::debug('LLM raw response', [
-            'content' => $text,
+        // Log exactly what's being sent to the LLM (for debugging)
+        Log::debug('LLM request payload', [
+            'system_message' => $system,
+            'user_message' => $user,
         ]);
 
-        if (!$text) {
+        // Build initial messages
+        $messages = [
+            ['role' => 'system', 'content' => $system],
+            ['role' => 'user', 'content' => $user],
+        ];
+
+        // First attempt
+        $result = $this->callLLM($messages);
+
+        if ($result['error']) {
+            $statusCode = $result['raw'] ? 500 : ($result['error'] === 'Unable to connect to AI service. Please check your connection and try again.' ? 503 : 500);
             return response()->json([
-                'error' => 'OpenAI returned no content',
-            ], 500);
+                'error' => $result['error'],
+                'raw' => $result['raw'],
+            ], $statusCode);
         }
 
-        $package = null;
-
-        // 1) Try direct decode first
-        $decoded = json_decode($text, true);
-        if (is_array($decoded)) {
-            $package = $decoded;
-        } else {
-            // 2) Strip Markdown fences if present
-            $clean = trim($text);
-
-            // Remove ```json or ``` fences
-            $clean = preg_replace('/^```(?:json)?/i', '', $clean);
-            $clean = preg_replace('/```$/', '', $clean);
-            $clean = trim($clean);
-
-            // 3) Try decode again
-            $decoded = json_decode($clean, true);
-            if (is_array($decoded)) {
-                $package = $decoded;
-            } else {
-                // 4) Last resort: extract first JSON object
-                if (preg_match('/\{.*\}/s', $clean, $m)) {
-                    $decoded = json_decode($m[0], true);
-                    if (is_array($decoded)) {
-                        $package = $decoded;
-                    }
-                }
-            }
-        }
-
-        if (!$package) {
-            Log::warning('Failed to parse LLM JSON', ['raw' => $text]);
-            return response()->json([
-                'error' => 'LLM output could not be parsed as JSON',
-                'raw' => $text,
-            ], 500);
-        }
-
+        $package = $result['package'];
         $violations = $this->validatePackage($package);
+        $didAutoRetry = false;
 
+        // If validation failed, try ONE automatic retry with feedback
         if (!empty($violations)) {
-            Log::info('LLM output failed validation', [
+            Log::info('LLM output failed validation, attempting auto-retry', [
                 'violations' => $violations,
                 'package' => $package,
             ]);
 
-            return response()->json([
-                'error' => 'Generated app violates sandbox rules',
-                'violations' => $violations,
-            ], 422);
+            // Build correction message
+            $violationsList = implode("\n- ", $violations);
+            $correctionMessage = <<<MSG
+Your previous output violated sandbox rules:
+- {$violationsList}
+
+Please fix these issues and return the corrected JSON. Remember:
+- Do NOT use <form> tags - use buttons with JavaScript click handlers instead
+- Do NOT use fetch() or XMLHttpRequest
+- Do NOT use localStorage/sessionStorage (use sdk.getState/setState instead)
+- Do NOT use window.location or document.cookie
+
+Return the complete fixed JSON only.
+MSG;
+
+            // Add the assistant's response and our correction to the conversation
+            $messages[] = ['role' => 'assistant', 'content' => $result['raw']];
+            $messages[] = ['role' => 'user', 'content' => $correctionMessage];
+
+            Log::info('Auto-retry initiated for validation failure');
+            Log::debug('LLM retry request payload', [
+                'correction_message' => $correctionMessage,
+            ]);
+
+            // Retry
+            $retryResult = $this->callLLM($messages);
+
+            if ($retryResult['error']) {
+                // Retry failed, return original validation error
+                return response()->json([
+                    'error' => 'Generated app violates sandbox rules (auto-retry also failed)',
+                    'violations' => $violations,
+                ], 422);
+            }
+
+            $retryPackage = $retryResult['package'];
+            $retryViolations = $this->validatePackage($retryPackage);
+
+            if (!empty($retryViolations)) {
+                Log::info('LLM auto-retry still failed validation', [
+                    'violations' => $retryViolations,
+                    'package' => $retryPackage,
+                ]);
+
+                return response()->json([
+                    'error' => 'Generated app violates sandbox rules',
+                    'violations' => $retryViolations,
+                    'auto_retry_attempted' => true,
+                ], 422);
+            }
+
+            // Retry succeeded!
+            Log::info('LLM auto-retry succeeded');
+            $package = $retryPackage;
+            $didAutoRetry = true;
         }
 
 
@@ -329,12 +404,19 @@ USR;
         }
 
         // Minimal normalisation
-        return response()->json([
+        $response = [
             'id' => $appId,
             'title' => $package['title'] ?? 'Generated app',
             'html' => $package['html'] ?? "<div id='app'></div>",
             'css' => $package['css'] ?? '',
             'js' => $package['js'] ?? '',
-        ]);
+        ];
+
+        // Let frontend know if we auto-retried
+        if ($didAutoRetry) {
+            $response['auto_retry'] = true;
+        }
+
+        return response()->json($response);
     }
 }

@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { LtiTokenRetriever, LtiPageSettings, LtiHeightLimit } from '@oxctl/ui-lti'
 import Runner from './components/Runner'
 import AuthDebug from './components/AuthDebug'
 import { View } from '@instructure/ui-view'
@@ -11,8 +12,8 @@ import { DrawerLayout } from '@instructure/ui-drawer-layout'
 import { Tabs } from '@instructure/ui-tabs'
 import { Heading } from '@instructure/ui-heading'
 import { Text } from '@instructure/ui-text'
+import { Spinner } from '@instructure/ui-spinner'
 import { IconHamburgerLine } from '@instructure/ui-icons'
-import { IconXLine } from '@instructure/ui-icons'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -56,6 +57,8 @@ export default function App() {
   //for the LLM authoring
   const [prompt, setPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [elapsedTime, setElapsedTime] = useState(0)
+  const timerRef = useRef(null)
   // Revision approval workflow
   const [pendingRevision, setPendingRevision] = useState(() => {
     const raw = sessionStorage.getItem('pendingRevision')
@@ -69,6 +72,35 @@ export default function App() {
   const [originalApp, setOriginalApp] = useState(null)
   // Drawer layout state
   const [isTrayOpen, setIsTrayOpen] = useState(true)
+  // LTI launch state
+  const [ltiError, setLtiError] = useState(null)
+
+  // Handle JWT from LtiTokenRetriever (Tool Support launch)
+  const handleLtiJwt = useCallback(async (toolSupportJwt, server) => {
+    console.log('LTI JWT received from Tool Support:', { server, jwtPreview: toolSupportJwt?.substring(0, 50) + '...' })
+
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool_support_jwt: toolSupportJwt }),
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `Bootstrap failed (${res.status})`)
+      }
+
+      const data = await res.json()
+      setToken(data.access_token)
+      setBootstrapInfo(data)
+      setStatus('LTI launch successful')
+    } catch (e) {
+      console.error('LTI bootstrap error:', e)
+      setLtiError(e.message)
+      setStatus(`LTI launch failed: ${e.message}`)
+    }
+  }, [])
 
   function setToken(token) {
     if (token) {
@@ -79,6 +111,35 @@ export default function App() {
       setAccessToken(null)
     }
   }
+
+  // Auto-refresh token before expiry
+  useEffect(() => {
+    if (!accessToken) return
+
+    // Refresh 5 minutes before expiry (token is 30min, refresh at 25min)
+    const refreshInterval = 25 * 60 * 1000
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}` },
+        })
+
+        if (res.ok) {
+          const data = await res.json()
+          setToken(data.access_token)
+          console.log('Token refreshed successfully')
+        } else {
+          console.warn('Token refresh failed, user may need to re-launch')
+        }
+      } catch (e) {
+        console.error('Token refresh error:', e)
+      }
+    }, refreshInterval)
+
+    return () => clearInterval(interval)
+  }, [accessToken])
 
   async function loadAppById(appId) {
     if (!accessToken) return
@@ -114,7 +175,13 @@ export default function App() {
 
     const isRevising = appPackage?.id
     setGenerating(true)
+    setElapsedTime(0)
     setStatus(isRevising ? 'Revising app…' : 'Generating app…')
+
+    // Start elapsed time counter
+    timerRef.current = setInterval(() => {
+      setElapsedTime((prev) => prev + 1)
+    }, 1000)
 
     try {
       const requestBody = { prompt }
@@ -139,21 +206,28 @@ export default function App() {
         return
       }
 
+      const autoRetryNote = body.auto_retry ? ' (auto-corrected)' : ''
+
       if (isRevising) {
         // Store as pending revision (not saved to DB yet)
         setPendingRevision(body)
-        setStatus('Revision ready. Review and Keep or Revert.')
+        setStatus(`Revision ready${autoRetryNote}. Review and Keep or Revert.`)
       } else {
         // New app - save immediately
         setAppPackage(body)
         setBootstrapInfo((prev) => (prev ? { ...prev, app_id: body.id } : prev))
         sessionStorage.setItem('lastAppId', String(body.id))
-        setStatus(`App generated: ${body.title}`)
+        setStatus(`App generated: ${body.title}${autoRetryNote}`)
       }
       setPrompt('') // Clear prompt after successful generation/revision
     } catch (e) {
       setStatus(String(e))
     } finally {
+      // Stop the timer
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
       setGenerating(false)
     }
   }
@@ -246,6 +320,15 @@ export default function App() {
     }
   }, [pendingRevision])
 
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+      }
+    }
+  }, [])
+
   async function clearApp() {
     if (!accessToken) return
     setClearing(true)
@@ -291,7 +374,12 @@ export default function App() {
     }
   }
 
-  return (
+  // Check if this is an LTI launch (has token param from Tool Support)
+  const urlParams = new URLSearchParams(window.location.search)
+  const isLtiLaunch = urlParams.has('token')
+
+  // Main app content
+  const appContent = (
     <DrawerLayout minHeight="100vh">
       <DrawerLayout.Tray
         label="Controls"
@@ -300,6 +388,17 @@ export default function App() {
         onDismiss={() => setIsTrayOpen(false)}
       >
         <View as="div" padding="medium">
+          <Flex justifyItems="end" margin="0 0 small 0">
+            <IconButton
+              screenReaderLabel="Close controls"
+              onClick={() => setIsTrayOpen(false)}
+              size="small"
+              withBackground={false}
+              withBorder={false}
+            >
+              <IconHamburgerLine />
+            </IconButton>
+          </Flex>
           <Tabs
             onRequestTabChange={(event, { index }) => {
               setActiveTab(index === 0 ? 'app' : 'auth')
@@ -367,8 +466,20 @@ export default function App() {
                 </Flex>
               </View>
 
+              {/* Loading indicator with timer */}
+              {generating && (
+                <View as="div" margin="small 0" padding="small" background="secondary">
+                  <Flex alignItems="center" gap="small">
+                    <Spinner size="x-small" renderTitle="Generating" />
+                    <Text>
+                      {appPackage ? 'Revising' : 'Generating'} app… {elapsedTime}s
+                    </Text>
+                  </Flex>
+                </View>
+              )}
+
               {/* Status */}
-              {status && (
+              {!generating && status && (
                 <View as="div" margin="small 0">
                   <Text color="secondary">{status}</Text>
                 </View>
@@ -392,14 +503,19 @@ export default function App() {
 
       <DrawerLayout.Content label="App Preview">
         <View as="div" padding="medium">
-          <Flex margin="0 0 small 0">
-            <Button
-              onClick={() => setIsTrayOpen(!isTrayOpen)}
-              size="small"
-            >
-              {isTrayOpen ? 'Hide Controls' : 'Show Controls'}
-            </Button>
-          </Flex>
+          {!isTrayOpen && (
+            <Flex margin="0 0 small 0">
+              <IconButton
+                screenReaderLabel="Show controls"
+                onClick={() => setIsTrayOpen(true)}
+                size="small"
+                withBackground={false}
+                withBorder={false}
+              >
+                <IconHamburgerLine />
+              </IconButton>
+            </Flex>
+          )}
           <Runner
             apiBase={API_BASE}
             token={accessToken}
@@ -409,4 +525,21 @@ export default function App() {
       </DrawerLayout.Content>
     </DrawerLayout>
   )
+
+  // If LTI launch, wrap with LtiTokenRetriever to fetch JWT from Tool Support
+  // Otherwise render directly (for local dev or when already authenticated)
+  if (isLtiLaunch && !accessToken) {
+    return (
+      <LtiPageSettings>
+        <LtiHeightLimit>
+          <LtiTokenRetriever handleJwt={handleLtiJwt}>
+            {appContent}
+          </LtiTokenRetriever>
+        </LtiHeightLimit>
+      </LtiPageSettings>
+    )
+  }
+
+  // Direct access (no LTI) or already authenticated
+  return appContent
 }

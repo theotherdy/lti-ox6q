@@ -30,9 +30,28 @@ class LocalJwtAuth
             return response()->json(['error' => 'Token missing sub claim.'], 401);
         }
 
+        // Validate LTI context is present
+        $lti = $payload['lti'] ?? null;
+        if (!is_array($lti)) {
+            return response()->json(['error' => 'Token missing LTI context.'], 401);
+        }
+
+        $issuer = $lti['issuer'] ?? null;
+        $deploymentId = $lti['deployment_id'] ?? null;
+        $resourceLinkId = $lti['resource_link_id'] ?? null;
+
+        if (!is_string($issuer) || $issuer === '' ||
+            !is_string($deploymentId) || $deploymentId === '' ||
+            !is_string($resourceLinkId) || $resourceLinkId === '') {
+            return response()->json(['error' => 'Token missing required LTI context claims.'], 401);
+        }
+
         // Attach auth context to the request
         $request->attributes->set('auth', $payload);
         $request->attributes->set('auth_sub', $sub);
+        $request->attributes->set('auth_lti_issuer', $issuer);
+        $request->attributes->set('auth_lti_deployment_id', $deploymentId);
+        $request->attributes->set('auth_lti_resource_link_id', $resourceLinkId);
 
         return $next($request);
     }

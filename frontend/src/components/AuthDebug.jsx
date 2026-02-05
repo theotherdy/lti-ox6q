@@ -35,13 +35,24 @@ export default function AuthDebug({
     }
   }
 
+  const preStyle = {
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    overflow: 'auto',
+    maxHeight: '200px',
+    fontSize: '12px',
+    background: '#f5f5f5',
+    padding: '8px',
+    borderRadius: '4px',
+  }
+
   return (
-    <div>
-      <h2>Auth / Bootstrap (Debug)</h2>
+    <div style={{ maxWidth: '100%', overflow: 'hidden' }}>
+      <h2 style={{ fontSize: '1.2rem', margin: '0 0 12px 0' }}>Auth / Bootstrap (Debug)</h2>
 
       <textarea
-        rows={6}
-        style={{ width: '100%' }}
+        rows={4}
+        style={{ width: '100%', boxSizing: 'border-box' }}
         placeholder="Paste Tool Support / Canvas JWT here"
         value={jwt}
         onChange={(e) => setJwt(e.target.value)}
@@ -61,17 +72,19 @@ export default function AuthDebug({
 
       {bootstrapInfo && (
         <>
-          <h3>Bootstrap result</h3>
-          <pre>{JSON.stringify(bootstrapInfo, null, 2)}</pre>
+          <h3 style={{ fontSize: '1rem', margin: '12px 0 8px 0' }}>Bootstrap result</h3>
+          <pre style={preStyle}>{JSON.stringify(bootstrapInfo, null, 2)}</pre>
         </>
       )}
 
       {accessToken && (
         <>
-          <h3>Local access token</h3>
-          <pre>{accessToken}</pre>
+          <h3 style={{ fontSize: '1rem', margin: '12px 0 8px 0' }}>Local access token</h3>
+          <pre style={preStyle}>{accessToken}</pre>
         </>
       )}
+
+      <div style={{ marginTop: 12 }}>
         <button onClick={() => {
             setBootstrapInfo(null)
             sessionStorage.removeItem('accessToken')
@@ -79,8 +92,7 @@ export default function AuthDebug({
             }}>
             Reset session (debug)
         </button>
+      </div>
     </div>
-
-    
   )
 }

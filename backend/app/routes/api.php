@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthBootstrapController;
+use App\Http\Controllers\AuthRefreshController;
 use App\Http\Controllers\AppController;
 use App\Http\Controllers\GenerateAppController;
 use App\Http\Middleware\LocalJwtAuth;
@@ -16,6 +17,7 @@ Route::options('/{any}', function () {
 })->where('any', '.*');
 
 Route::post('/auth/bootstrap', [AuthBootstrapController::class, 'bootstrap']);
+Route::post('/auth/refresh', [AuthRefreshController::class, 'refresh']);
 
 Route::middleware([LocalJwtAuth::class])->group(function () {
     Route::get('/apps/{appId}/package', [AppController::class, 'package'])->whereNumber('appId');

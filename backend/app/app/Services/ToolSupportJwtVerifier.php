@@ -20,7 +20,8 @@ class ToolSupportJwtVerifier
      */
     public function verify(string $jwt): array
     {
-        $skipSig = strtolower((string) env('TOOLSUPPORT_SKIP_SIGNATURE', 'false')) === 'true';
+        // Handle both boolean true and string "true"
+        $skipSig = filter_var(env('TOOLSUPPORT_SKIP_SIGNATURE', false), FILTER_VALIDATE_BOOLEAN);
         $jwksUrl = trim((string) env('TOOLSUPPORT_JWKS_URL', ''));
 
         if ($skipSig) {
