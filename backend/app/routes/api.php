@@ -21,6 +21,7 @@ Route::middleware([LocalJwtAuth::class])->group(function () {
     Route::get('/apps/{appId}/package', [AppController::class, 'package'])->whereNumber('appId');
     Route::get('/apps/{appId}/state', [AppController::class, 'getState'])->whereNumber('appId');
     Route::put('/apps/{appId}/state', [AppController::class, 'setState'])->whereNumber('appId');
+    Route::put('/apps/{appId}/save-revision', [AppController::class, 'saveRevision'])->whereNumber('appId');
     Route::delete('/apps/mapping', [AppController::class, 'clearMapping']);
     Route::post('/apps/generate', [GenerateAppController::class, 'generate']);
 });

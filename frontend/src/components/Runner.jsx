@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert } from '@instructure/ui'
+import { Alert } from '@instructure/ui-alerts'
+import { View } from '@instructure/ui-view'
+import { ToggleDetails } from '@instructure/ui-toggle-details'
+import { Heading } from '@instructure/ui-heading'
+import { List } from '@instructure/ui-list'
+import { Badge } from '@instructure/ui-badge'
+import { Text } from '@instructure/ui-text'
+import { Flex } from '@instructure/ui-flex'
 
 
 
@@ -161,61 +168,89 @@ export default function Runner({ apiBase, token, pkg }) {
 
   if (!token) {
     return (
-      <div style={{ padding: 24, opacity: 0.7 }}>
-        <p>
-          Not authenticated yet.
-        </p>
-        <p>
-          Open the <b>Auth / Bootstrap</b> tab to initialise a session.
-        </p>
-      </div>
+      <View as="div" padding="medium">
+        <Text color="secondary">Not authenticated yet.</Text>
+        <Text color="secondary">
+          Open the <Text weight="bold">Auth / Bootstrap</Text> tab to initialise a session.
+        </Text>
+      </View>
     )
   }
 
   if (!pkg) {
     return (
-      <div style={{ padding: 24, opacity: 0.7 }}>
-        <p>No application loaded yet.</p>
-        <p>
-          Load the dummy app or generate one to begin.
-        </p>
-      </div>
+      <View as="div" padding="medium">
+        <Text color="secondary">No application loaded yet.</Text>
+        <Text color="secondary">
+          Generate an app to begin.
+        </Text>
+      </View>
     )
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
-      <div style={{ border: '1px solid #ddd', borderRadius: 12, overflow: 'hidden', position: 'relative' }}>
+    <View as="div">
+      {/* App iframe */}
+      <View
+        as="div"
+        borderWidth="small"
+        borderRadius="medium"
+        background="primary"
+        margin="0 0 medium 0"
+        position="relative"
+      >
         {/* !!!!!Don't allow any powers other than allow-scripts without serious thought!!!!!! */}
         <iframe
           ref={iframeRef}
           title="Learning app"
-          sandbox="allow-scripts"  
+          sandbox="allow-scripts"
           srcDoc={srcDoc}
-          style={{ width: '100%', height: 420, border: 0 }}
+          style={{ width: '100%', height: '600px', border: 'none', borderRadius: '8px' }}
         />
-        <div style={{ position: 'absolute', top: 12, right: 12, width: 360, display: 'grid', gap: 8 }}>
-          {notices.map((n) => (
-            <Alert key={n.id} variant={n.variant} margin="0">
-              {n.message}
-            </Alert>
-          ))}
-        </div>
-      </div>
-      <div style={{ background: '#f6f6f6', borderRadius: 12, padding: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 8 }}>SDK log</div>
-        {log.length ? (
-          <ul style={{ margin: 0, paddingLeft: 16 }}>
-            {log.map((x, i) => (
-              <li key={i} style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 }}>
-                {x}
-              </li>
+        {/* Notification overlay */}
+        <View
+          as="div"
+          position="absolute"
+          insetInlineEnd="small"
+          insetBlockStart="small"
+          width="360px"
+        >
+          <Flex direction="column" gap="x-small">
+            {notices.map((n) => (
+              <Alert key={n.id} variant={n.variant} margin="0">
+                {n.message}
+              </Alert>
             ))}
-          </ul>
-        ) : (
-          <div style={{ opacity: 0.7 }}>No calls yet.</div>
-        )}
-      </div>
-    </div>
+          </Flex>
+        </View>
+      </View>
+
+      {/* Collapsible SDK log */}
+      <ToggleDetails
+        summary={
+          <Flex gap="small" alignItems="center">
+            <Heading level="h4">SDK Call Log</Heading>
+            <Badge count={log.length} />
+          </Flex>
+        }
+        defaultExpanded={false}
+      >
+        <View as="div" background="secondary" padding="small" borderRadius="medium">
+          {log.length === 0 ? (
+            <Text color="secondary">No SDK calls yet</Text>
+          ) : (
+            <List isUnstyled margin="0">
+              {log.map((x, i) => (
+                <List.Item key={i}>
+                  <Text fontFamily="monospace" size="small">
+                    {x}
+                  </Text>
+                </List.Item>
+              ))}
+            </List>
+          )}
+        </View>
+      </ToggleDetails>
+    </View>
   )
 }

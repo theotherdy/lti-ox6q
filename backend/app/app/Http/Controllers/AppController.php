@@ -130,6 +130,96 @@ class AppController extends Controller
         return response()->json(['ok' => true, 'deleted' => $deleted]);
     }
 
+    public function saveRevision(Request $request, $appId)
+    {
+        $request->validate([
+            'title' => 'required|string',
+            'html' => 'required|string',
+            'css' => 'required|string',
+            'js' => 'required|string',
+        ]);
+
+        // Validate against sandbox rules
+        $violations = $this->validatePackage([
+            'title' => $request->title,
+            'html' => $request->html,
+            'css' => $request->css,
+            'js' => $request->js,
+        ]);
+
+        if (!empty($violations)) {
+            return response()->json([
+                'error' => 'Revision violates sandbox rules',
+                'violations' => $violations,
+            ], 422);
+        }
+
+        // Verify app exists
+        $app = DB::table('apps')->where('id', $appId)->first();
+        if (!$app) {
+            return response()->json(['error' => 'App not found'], 404);
+        }
+
+        // Save the revision
+        DB::table('apps')->where('id', $appId)->update([
+            'title' => $request->title,
+            'html' => $request->html,
+            'css' => $request->css,
+            'js' => $request->js,
+            'updated_at' => now(),
+        ]);
+
+        return response()->json(['success' => true]);
+    }
+
+    private function validatePackage(array $pkg): array
+    {
+        $violations = [];
+
+        $html = $pkg['html'] ?? '';
+        $js   = $pkg['js']   ?? '';
+
+        // ---- HTML checks ----
+        if (stripos($html, '<form') !== false) {
+            $violations[] = 'HTML forms are not allowed (use JavaScript handlers instead)';
+        }
+
+        if (stripos($html, 'action=') !== false) {
+            $violations[] = 'Form action attributes are not allowed';
+        }
+
+        if (stripos($html, '<script') !== false && stripos($html, '<script src') !== false) {
+            $violations[] = 'External script tags are not allowed';
+        }
+
+        if (stripos($html, '<iframe') !== false) {
+            $violations[] = 'Nested iframes are not allowed';
+        }
+
+        // ---- JS checks ----
+        if (stripos($js, 'fetch(') !== false) {
+            $violations[] = 'Network access via fetch() is not allowed';
+        }
+
+        if (stripos($js, 'XMLHttpRequest') !== false) {
+            $violations[] = 'Network access via XMLHttpRequest is not allowed';
+        }
+
+        if (stripos($js, 'window.location') !== false) {
+            $violations[] = 'Navigation via window.location is not allowed';
+        }
+
+        if (stripos($js, 'document.cookie') !== false) {
+            $violations[] = 'Accessing cookies is not allowed';
+        }
+
+        if (stripos($js, 'localStorage') !== false || stripos($js, 'sessionStorage') !== false) {
+            $violations[] = 'Browser storage APIs are not allowed (use sdk.getState/setState)';
+        }
+
+        return $violations;
+    }
+
     private function getLtiUserId(string $sub): int
     {
         $now = now();

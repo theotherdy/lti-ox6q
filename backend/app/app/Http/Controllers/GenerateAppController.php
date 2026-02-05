@@ -67,6 +67,7 @@ class GenerateAppController extends Controller
         $request->validate([
             'prompt' => 'required|string|max:10000',
             'app_id' => 'nullable|integer|exists:apps,id',
+            'preview' => 'nullable|boolean',
         ]);
 
         // Fetch existing app if this is a revision
@@ -271,27 +272,35 @@ USR;
         }
 
 
-        // Persist or update the app
-        if ($existingApp) {
-            // Update existing app
-            DB::table('apps')->where('id', $existingApp->id)->update([
-                'title' => $package['title'] ?? $existingApp->title,
-                'html' => $package['html'] ?? '',
-                'css' => $package['css'] ?? '',
-                'js' => $package['js'] ?? '',
-                'updated_at' => now(),
-            ]);
-            $appId = $existingApp->id;
+        // Only persist if not in preview mode
+        $preview = $request->input('preview', false);
+
+        if (!$preview) {
+            // Persist or update the app
+            if ($existingApp) {
+                // Update existing app
+                DB::table('apps')->where('id', $existingApp->id)->update([
+                    'title' => $package['title'] ?? $existingApp->title,
+                    'html' => $package['html'] ?? '',
+                    'css' => $package['css'] ?? '',
+                    'js' => $package['js'] ?? '',
+                    'updated_at' => now(),
+                ]);
+                $appId = $existingApp->id;
+            } else {
+                // Insert new app
+                $appId = DB::table('apps')->insertGetId([
+                    'title' => $package['title'] ?? 'Generated app',
+                    'html' => $package['html'] ?? "<div id='app'></div>",
+                    'css' => $package['css'] ?? '',
+                    'js' => $package['js'] ?? '',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
         } else {
-            // Insert new app
-            $appId = DB::table('apps')->insertGetId([
-                'title' => $package['title'] ?? 'Generated app',
-                'html' => $package['html'] ?? "<div id='app'></div>",
-                'css' => $package['css'] ?? '',
-                'js' => $package['js'] ?? '',
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
+            // Preview mode - don't persist, just return the package
+            $appId = $existingApp ? $existingApp->id : null;
         }
 
         // If we have LTI context, map this app to the resource link
