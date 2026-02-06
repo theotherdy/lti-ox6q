@@ -21,7 +21,37 @@ class LocalJwtAuth
         try {
             $payloadObj = JWT::decode($token, new Key((string) env('LOCAL_JWT_SECRET'), 'HS256'));
             $payload = json_decode(json_encode($payloadObj), true);
+
+            \Log::debug('LocalJwtAuth: Token validated', [
+                'iat' => $payload['iat'] ?? null,
+                'exp' => $payload['exp'] ?? null,
+                'now' => time(),
+                'age_seconds' => time() - ($payload['iat'] ?? time()),
+                'ttl_seconds' => ($payload['exp'] ?? time()) - time(),
+            ]);
         } catch (\Throwable $e) {
+            // Try to decode without verification to see timing info
+            $parts = explode('.', $token);
+            if (count($parts) === 3) {
+                try {
+                    $payloadJson = base64_decode(strtr($parts[1], '-_', '+/'));
+                    $decoded = json_decode($payloadJson, true);
+                    \Log::warning('LocalJwtAuth: Token decode failed', [
+                        'error' => $e->getMessage(),
+                        'error_class' => get_class($e),
+                        'token_iat' => $decoded['iat'] ?? null,
+                        'token_exp' => $decoded['exp'] ?? null,
+                        'now' => time(),
+                        'age_seconds' => time() - ($decoded['iat'] ?? time()),
+                        'expired_by_seconds' => time() - ($decoded['exp'] ?? time()),
+                    ]);
+                } catch (\Throwable $ignored) {
+                    \Log::warning('LocalJwtAuth: Token decode failed', [
+                        'error' => $e->getMessage(),
+                        'error_class' => get_class($e),
+                    ]);
+                }
+            }
             return response()->json(['error' => 'Invalid token.'], 401);
         }
 

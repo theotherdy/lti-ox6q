@@ -112,12 +112,15 @@ export default function App() {
     }
   }
 
-  // Auto-refresh token before expiry
+  // Auto-refresh token before expiry (at 95% of lifetime)
   useEffect(() => {
-    if (!accessToken) return
+    if (!accessToken || !bootstrapInfo?.expires_in) return
 
-    // Refresh 5 minutes before expiry (token is 30min, refresh at 25min)
-    const refreshInterval = 25 * 60 * 1000
+    // Refresh at 95% of token lifetime (e.g., 57s for 60s token, 28.5min for 30min token)
+    const expiresInMs = bootstrapInfo.expires_in * 1000
+    const refreshInterval = expiresInMs * 0.95
+
+    console.log(`Token auto-refresh scheduled in ${Math.round(refreshInterval / 1000)}s (95% of ${bootstrapInfo.expires_in}s lifetime)`)
 
     const interval = setInterval(async () => {
       try {
@@ -139,7 +142,7 @@ export default function App() {
     }, refreshInterval)
 
     return () => clearInterval(interval)
-  }, [accessToken])
+  }, [accessToken, bootstrapInfo])
 
   async function loadAppById(appId) {
     if (!accessToken) return
