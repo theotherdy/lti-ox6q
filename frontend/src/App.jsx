@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { LtiTokenRetriever, LtiPageSettings, LtiHeightLimit } from '@oxctl/ui-lti'
 import Runner from './components/Runner'
-import AuthDebug from './components/AuthDebug'
+import StructuredQuestionRunner from './components/StructuredQuestionRunner'
 import { View } from '@instructure/ui-view'
 import { Flex } from '@instructure/ui-flex'
 import { Button } from '@instructure/ui-buttons'
@@ -9,11 +9,11 @@ import { IconButton } from '@instructure/ui-buttons'
 import { TextArea } from '@instructure/ui-text-area'
 import { Alert } from '@instructure/ui-alerts'
 import { DrawerLayout } from '@instructure/ui-drawer-layout'
-import { Tabs } from '@instructure/ui-tabs'
 import { Heading } from '@instructure/ui-heading'
 import { Text } from '@instructure/ui-text'
 import { Spinner } from '@instructure/ui-spinner'
 import { IconHamburgerLine } from '@instructure/ui-icons'
+import { ScreenReaderContent } from '@instructure/ui-a11y-content'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -37,7 +37,6 @@ function parseJwt(token) {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('app') // 'app' | 'auth'
   const [accessToken, setAccessToken] = useState(
     () => sessionStorage.getItem('accessToken')
   )
@@ -52,7 +51,7 @@ export default function App() {
   })
 
   const [appPackage, setAppPackage] = useState(null)
-  const [status, setStatus] = useState(null)
+  const [errorMessage, setErrorMessage] = useState(null)
   const [clearing, setClearing] = useState(false)
   //for the LLM authoring
   const [prompt, setPrompt] = useState('')
@@ -72,8 +71,6 @@ export default function App() {
   const [originalApp, setOriginalApp] = useState(null)
   // Drawer layout state
   const [isTrayOpen, setIsTrayOpen] = useState(true)
-  // LTI launch state
-  const [ltiError, setLtiError] = useState(null)
 
   // Handle JWT from LtiTokenRetriever (Tool Support launch)
   const handleLtiJwt = useCallback(async (toolSupportJwt, server) => {
@@ -94,11 +91,10 @@ export default function App() {
       const data = await res.json()
       setToken(data.access_token)
       setBootstrapInfo(data)
-      setStatus('LTI launch successful')
+      setErrorMessage(null)
     } catch (e) {
       console.error('LTI bootstrap error:', e)
-      setLtiError(e.message)
-      setStatus(`LTI launch failed: ${e.message}`)
+      setErrorMessage(e.message)
     }
   }, [])
 
@@ -133,8 +129,14 @@ export default function App() {
           const data = await res.json()
           setToken(data.access_token)
           console.log('Token refreshed successfully')
+          setErrorMessage(null)
+          return
         } else {
           console.warn('Token refresh failed, user may need to re-launch')
+          if (res.status === 401) {
+            setToken(null)
+            setErrorMessage('Session expired — please re-launch.')
+          }
         }
       } catch (e) {
         console.error('Token refresh error:', e)
@@ -146,7 +148,6 @@ export default function App() {
 
   async function loadAppById(appId) {
     if (!accessToken) return
-    setStatus(`Loading app ${appId}...`)
     try {
       const res = await fetch(`${API_BASE}/api/apps/${appId}/package`, {
         headers: {
@@ -155,31 +156,30 @@ export default function App() {
         },
       })
       const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setStatus(`Load failed: ${body.error || res.statusText}`)
-        return
-      }
       if (res.status === 401) {
         setToken(null)
-        setStatus('Session expired — please re-bootstrap')
+        setErrorMessage('Session expired — please re-launch.')
+        return
+      }
+      if (!res.ok) {
+        setErrorMessage(`Load failed: ${body.error || res.statusText}`)
         return
       }
       setAppPackage(body)
-      setAppPackage(body)
       sessionStorage.setItem('lastAppId', String(body.id))
-      setStatus(`App ${body.id} loaded`)
+      setErrorMessage(null)
     } catch (e) {
-      setStatus(`Load error: ${String(e)}`)
+      setErrorMessage(`Load error: ${String(e)}`)
     }
   }
 
   async function generateApp() {
     if (!prompt.trim() || !accessToken) return
 
-    const isRevising = appPackage?.id
+    const isRevising = Boolean(appPackage?.id)
     setGenerating(true)
     setElapsedTime(0)
-    setStatus(isRevising ? 'Revising app…' : 'Generating app…')
+    setErrorMessage(null)
 
     // Start elapsed time counter
     timerRef.current = setInterval(() => {
@@ -204,27 +204,29 @@ export default function App() {
       })
 
       const body = await res.json().catch(() => ({}))
+      if (res.status === 401) {
+        setToken(null)
+        setErrorMessage('Session expired — please re-launch.')
+        return
+      }
       if (!res.ok) {
-        setStatus(body.error || (isRevising ? 'Revision failed' : 'Generation failed'))
+        setErrorMessage(body.error || (isRevising ? 'Revision failed' : 'Generation failed'))
         return
       }
 
-      const autoRetryNote = body.auto_retry ? ' (auto-corrected)' : ''
-
       if (isRevising) {
-        // Store as pending revision (not saved to DB yet)
+        // Store pending revision for both open and structured modes.
         setPendingRevision(body)
-        setStatus(`Revision ready${autoRetryNote}. Review and Keep or Revert.`)
       } else {
-        // New app - save immediately
         setAppPackage(body)
-        setBootstrapInfo((prev) => (prev ? { ...prev, app_id: body.id } : prev))
-        sessionStorage.setItem('lastAppId', String(body.id))
-        setStatus(`App generated: ${body.title}${autoRetryNote}`)
+        if (body.id) {
+          setBootstrapInfo((prev) => (prev ? { ...prev, app_id: body.id } : prev))
+          sessionStorage.setItem('lastAppId', String(body.id))
+        }
       }
       setPrompt('') // Clear prompt after successful generation/revision
     } catch (e) {
-      setStatus(String(e))
+      setErrorMessage(String(e))
     } finally {
       // Stop the timer
       if (timerRef.current) {
@@ -238,8 +240,6 @@ export default function App() {
   async function keepRevision() {
     if (!pendingRevision || !accessToken) return
 
-    setStatus('Saving revision...')
-
     try {
       const res = await fetch(`${API_BASE}/api/apps/${pendingRevision.id}/save-revision`, {
         method: 'PUT',
@@ -247,17 +247,33 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({
-          title: pendingRevision.title,
-          html: pendingRevision.html,
-          css: pendingRevision.css,
-          js: pendingRevision.js,
-        }),
+        body: JSON.stringify(
+          pendingRevision.kind === 'structured_question_set'
+            ? {
+                kind: 'structured_question_set',
+                schema_version: pendingRevision.schema_version,
+                title: pendingRevision.title,
+                questions: pendingRevision.questions,
+                meta: pendingRevision.meta || {},
+              }
+            : {
+                kind: 'open_interaction',
+                title: pendingRevision.title,
+                html: pendingRevision.html,
+                css: pendingRevision.css,
+                js: pendingRevision.js,
+              }
+        ),
       })
 
       const body = await res.json().catch(() => ({}))
+      if (res.status === 401) {
+        setToken(null)
+        setErrorMessage('Session expired — please re-launch.')
+        return
+      }
       if (!res.ok) {
-        setStatus(body.error || 'Failed to save revision')
+        setErrorMessage(body.error || 'Failed to save revision')
         return
       }
 
@@ -265,9 +281,9 @@ export default function App() {
       setAppPackage(pendingRevision)
       setPendingRevision(null)
       setOriginalApp(null)
-      setStatus('Revision saved successfully')
+      setErrorMessage(null)
     } catch (e) {
-      setStatus(`Save error: ${String(e)}`)
+      setErrorMessage(`Save error: ${String(e)}`)
     }
   }
 
@@ -279,7 +295,6 @@ export default function App() {
 
     setPendingRevision(null)
     setOriginalApp(null)
-    setStatus('Reverted to original version')
   }
 
   useEffect(() => {
@@ -335,7 +350,7 @@ export default function App() {
   async function clearApp() {
     if (!accessToken) return
     setClearing(true)
-    setStatus('Clearing app mapping...')
+    setErrorMessage(null)
 
     try {
       const tokenLti = parseJwt(accessToken)?.lti
@@ -347,15 +362,20 @@ export default function App() {
           headers: jsonHeaders(accessToken),
         })
         const body = await res.json().catch(() => ({}))
+        if (res.status === 401) {
+          setToken(null)
+          setErrorMessage('Session expired — please re-launch.')
+          return
+        }
         if (!res.ok) {
-          setStatus(body.error || 'Failed to clear mapping')
+          setErrorMessage(body.error || 'Failed to clear mapping')
           return
         }
         if (typeof body.deleted === 'number' && body.deleted === 0) {
-          setStatus('No mapping row found to delete (cleared local selection).')
+          // No-op: user can see state in the preview panel.
         }
       } else {
-        setStatus('No LTI mapping in token; cleared local selection only.')
+        // No-op: user can see state in the preview panel.
       }
 
       setAppPackage(null)
@@ -364,14 +384,8 @@ export default function App() {
       setOriginalApp(null) // Clear original app
       setBootstrapInfo((prev) => (prev ? { ...prev, app_id: null } : prev))
       sessionStorage.removeItem('lastAppId')
-      if (!hasMapping) {
-        return
-      }
-      if (!status || status.startsWith('Clearing')) {
-        setStatus('Cleared app selection')
-      }
     } catch (e) {
-      setStatus(`Clear error: ${String(e)}`)
+      setErrorMessage(`Clear error: ${String(e)}`)
     } finally {
       setClearing(false)
     }
@@ -402,105 +416,89 @@ export default function App() {
               <IconHamburgerLine />
             </IconButton>
           </Flex>
-          <Tabs
-            onRequestTabChange={(event, { index }) => {
-              setActiveTab(index === 0 ? 'app' : 'auth')
-            }}
-          >
-            <Tabs.Panel
-              renderTitle="Application"
-              isSelected={activeTab === 'app'}
-            >
-              {/* Pending Revision Approval */}
-              {pendingRevision && (
-                <Alert
-                  variant="warning"
-                  margin="small 0"
-                  renderCloseButtonLabel="Close"
-                >
-                  <Flex direction="column" gap="small">
-                    <Heading level="h4">Revision Preview</Heading>
-                    <Text>Review the changes below. Keep to save permanently, or Revert to discard.</Text>
-                    <Flex gap="small">
-                      <Button onClick={keepRevision} color="success">
-                        Keep Revision
-                      </Button>
-                      <Button onClick={revertRevision} color="danger">
-                        Revert to Original
-                      </Button>
-                    </Flex>
-                  </Flex>
-                </Alert>
-              )}
 
-              {/* LLM authoring UI */}
-              <View as="div" margin="small 0">
-                <TextArea
-                  label="App Description"
-                  placeholder={
-                    appPackage
-                      ? "What changes would you like to make?…"
-                      : "Describe the learning activity you want…"
-                  }
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  disabled={generating}
-                  height="100px"
-                />
-                <Flex gap="small" margin="small 0">
-                  <Button
-                    onClick={generateApp}
-                    disabled={generating || !prompt.trim() || !accessToken || pendingRevision}
-                    color="primary"
-                  >
-                    {generating
-                      ? (appPackage ? 'Revising…' : 'Generating…')
-                      : (appPackage ? 'Revise app' : 'Generate app')
-                    }
+          {/* Errors */}
+          {errorMessage && (
+            <Alert
+              variant="error"
+              margin="0 0 small 0"
+              renderCloseButtonLabel="Close"
+              onDismiss={() => setErrorMessage(null)}
+              variantScreenReaderLabel="Error, "
+            >
+              {errorMessage}
+            </Alert>
+          )}
+
+          {/* Pending Revision Approval */}
+          {pendingRevision && (
+            <Alert
+              variant="warning"
+              margin="small 0"
+              renderCloseButtonLabel="Close"
+            >
+              <Flex direction="column" gap="small">
+                <Heading level="h4">Revision Preview</Heading>
+                <Text>Review the changes below. Keep to save permanently, or Revert to discard.</Text>
+                <Flex gap="small">
+                  <Button onClick={keepRevision} color="success">
+                    Keep Revision
                   </Button>
-                  {appPackage && (
-                    <Button
-                      onClick={clearApp}
-                      disabled={clearing || generating}
-                    >
-                      {clearing ? 'Clearing…' : 'Start Over'}
-                    </Button>
-                  )}
+                  <Button onClick={revertRevision} color="danger">
+                    Revert to Original
+                  </Button>
                 </Flex>
-              </View>
+              </Flex>
+            </Alert>
+          )}
 
-              {/* Loading indicator with timer */}
-              {generating && (
-                <View as="div" margin="small 0" padding="small" background="secondary">
-                  <Flex alignItems="center" gap="small">
-                    <Spinner size="x-small" renderTitle="Generating" />
-                    <Text>
-                      {appPackage ? 'Revising' : 'Generating'} app… {elapsedTime}s
-                    </Text>
-                  </Flex>
-                </View>
+          {/* LLM authoring UI */}
+          <View as="div" margin="small 0">
+            <TextArea
+              label={<ScreenReaderContent>App description</ScreenReaderContent>}
+              placeholder={
+                appPackage
+                  ? "What changes would you like to make?…"
+                  : "Describe the learning activity you want…"
+              }
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              disabled={generating}
+              height="100px"
+            />
+            <Flex gap="small" margin="small 0">
+              <Button
+                onClick={generateApp}
+                disabled={generating || !prompt.trim() || !accessToken || pendingRevision}
+                color="primary"
+              >
+                {generating
+                  ? (appPackage ? 'Revising…' : 'Generating…')
+                  : (appPackage ? 'Revise app' : 'Generate app')
+                }
+              </Button>
+              {appPackage && (
+                <Button
+                  onClick={clearApp}
+                  disabled={clearing || generating}
+                >
+                  {clearing ? 'Clearing…' : 'Start Over'}
+                </Button>
               )}
+            </Flex>
+          </View>
 
-              {/* Status */}
-              {!generating && status && (
-                <View as="div" margin="small 0">
-                  <Text color="secondary">{status}</Text>
-                </View>
-              )}
-            </Tabs.Panel>
-
-            <Tabs.Panel
-              renderTitle="Auth / Bootstrap"
-              isSelected={activeTab === 'auth'}
-            >
-              <AuthDebug
-                accessToken={accessToken}
-                setAccessToken={setToken}
-                bootstrapInfo={bootstrapInfo}
-                setBootstrapInfo={setBootstrapInfo}
-              />
-            </Tabs.Panel>
-          </Tabs>
+          {/* Loading indicator with timer */}
+          {generating && (
+            <View as="div" margin="small 0" padding="small" background="secondary">
+              <Flex alignItems="center" gap="small">
+                <Spinner size="x-small" renderTitle="Generating" />
+                <Text>
+                  {appPackage ? 'Revising' : 'Generating'} app… {elapsedTime}s
+                </Text>
+              </Flex>
+            </View>
+          )}
         </View>
       </DrawerLayout.Tray>
 
@@ -519,11 +517,17 @@ export default function App() {
               </IconButton>
             </Flex>
           )}
-          <Runner
-            apiBase={API_BASE}
-            token={accessToken}
-            pkg={pendingRevision || appPackage}
-          />
+          {(pendingRevision || appPackage)?.kind === 'structured_question_set' && (
+            <StructuredQuestionRunner pkg={pendingRevision || appPackage} />
+          )}
+          {(pendingRevision || appPackage)?.kind !== 'structured_question_set' && (
+            <Runner
+              apiBase={API_BASE}
+              token={accessToken}
+              pkg={pendingRevision || appPackage}
+              onError={setErrorMessage}
+            />
+          )}
         </View>
       </DrawerLayout.Content>
     </DrawerLayout>

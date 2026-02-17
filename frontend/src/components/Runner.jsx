@@ -79,7 +79,7 @@ ${js}
 </html>`;
 }
 
-export default function Runner({ apiBase, token, pkg }) {
+export default function Runner({ apiBase, token, pkg, onError }) {
   const iframeRef = useRef(null)
   const [log, setLog] = useState([])
   const [notices, setNotices] = useState([]) //used to display notifications from iFramed app via callParent('notify', payload);
@@ -126,6 +126,10 @@ export default function Runner({ apiBase, token, pkg }) {
           const res = await fetch(`${apiBase}/api/apps/${pkg.id}/state`, {
             headers: jsonHeaders(token),
           })
+          if (res.status === 401) {
+            onError?.('Session expired — please re-launch.')
+            throw new Error('Session expired')
+          }
           const body = await res.json().catch(() => ({}))
           if (!res.ok) throw new Error(body.error || res.statusText)
           setLog((l) => [`getState → ${JSON.stringify(body.state)}`, ...l].slice(0, 8))
@@ -139,6 +143,10 @@ export default function Runner({ apiBase, token, pkg }) {
             headers: jsonHeaders(token),
             body: JSON.stringify({ state: msg.payload?.state }),
           })
+          if (res.status === 401) {
+            onError?.('Session expired — please re-launch.')
+            throw new Error('Session expired')
+          }
           const body = await res.json().catch(() => ({}))
           if (!res.ok) throw new Error(body.error || res.statusText)
           setLog((l) => [`setState ← ${JSON.stringify(msg.payload?.state)}`, ...l].slice(0, 8))
@@ -164,14 +172,14 @@ export default function Runner({ apiBase, token, pkg }) {
 
     window.addEventListener('message', handleRpc)
     return () => window.removeEventListener('message', handleRpc)
-  }, [apiBase, pkg, token])
+  }, [apiBase, onError, pkg, token])
 
   if (!token) {
     return (
       <View as="div" padding="medium">
         <Text color="secondary">Not authenticated yet.</Text>
         <Text color="secondary">
-          Open the <Text weight="bold">Auth / Bootstrap</Text> tab to initialise a session.
+          Launch this tool from your LMS (LTI) to initialise a session.
         </Text>
       </View>
     )

@@ -8,6 +8,15 @@ use Illuminate\Support\Facades\Log;
 
 class AppController extends Controller
 {
+    private const STRUCTURED_TYPES = [
+        'multiple_choice_single_answer',
+        'multiple_choice_multiple_answer',
+        'matching',
+        'fill_in_blank',
+        'ordering',
+        'numeric',
+    ];
+
     public function package(Request $request, $appId)
     {
         if (!ctype_digit((string) $appId)) {
@@ -21,7 +30,25 @@ class AppController extends Controller
             return response()->json(['error' => 'App not found.'], 404);
         }
 
+        $kind = $row->kind ?? 'open_interaction';
+        if ($kind === 'structured_question_set') {
+            $structured = json_decode((string) ($row->structured_json ?? ''), true);
+            if (!is_array($structured)) {
+                return response()->json(['error' => 'Stored structured question payload is invalid.'], 500);
+            }
+
+            return response()->json([
+                'kind' => 'structured_question_set',
+                'id' => $row->id,
+                'schema_version' => $structured['schema_version'] ?? null,
+                'title' => $structured['title'] ?? $row->title,
+                'questions' => $structured['questions'] ?? [],
+                'meta' => $structured['meta'] ?? [],
+            ]);
+        }
+
         return response()->json([
+            'kind' => 'open_interaction',
             'id' => $row->id,
             'title' => $row->title,
             'html' => $row->html,
@@ -132,26 +159,9 @@ class AppController extends Controller
 
     public function saveRevision(Request $request, $appId)
     {
-        $request->validate([
-            'title' => 'required|string',
-            'html' => 'required|string',
-            'css' => 'required|string',
-            'js' => 'required|string',
-        ]);
-
-        // Validate against sandbox rules
-        $violations = $this->validatePackage([
-            'title' => $request->title,
-            'html' => $request->html,
-            'css' => $request->css,
-            'js' => $request->js,
-        ]);
-
-        if (!empty($violations)) {
-            return response()->json([
-                'error' => 'Revision violates sandbox rules',
-                'violations' => $violations,
-            ], 422);
+        $kind = $request->input('kind', 'open_interaction');
+        if (!is_string($kind) || !in_array($kind, ['open_interaction', 'structured_question_set'], true)) {
+            return response()->json(['error' => 'Invalid revision kind'], 422);
         }
 
         // Verify app exists
@@ -160,16 +170,245 @@ class AppController extends Controller
             return response()->json(['error' => 'App not found'], 404);
         }
 
-        // Save the revision
-        DB::table('apps')->where('id', $appId)->update([
-            'title' => $request->title,
-            'html' => $request->html,
-            'css' => $request->css,
-            'js' => $request->js,
-            'updated_at' => now(),
-        ]);
+        if ($kind === 'structured_question_set') {
+            $request->validate([
+                'schema_version' => 'required|string',
+                'title' => 'required|string',
+                'questions' => 'required|array|size:1',
+                'meta' => 'nullable|array',
+            ]);
+
+            $questions = $request->input('questions');
+            $q = $questions[0] ?? null;
+            if (!is_array($q) || !in_array(($q['question_type'] ?? null), self::STRUCTURED_TYPES, true)) {
+                return response()->json(['error' => 'Unsupported structured question type'], 422);
+            }
+            $validationError = $this->validateStructuredQuestion($q);
+            if ($validationError !== null) {
+                return response()->json(['error' => $validationError], 422);
+            }
+
+            $payload = [
+                'kind' => 'structured_question_set',
+                'schema_version' => $request->input('schema_version'),
+                'title' => $request->input('title'),
+                'questions' => $questions,
+                'meta' => $request->input('meta', []),
+            ];
+
+            DB::table('apps')->where('id', $appId)->update([
+                'title' => $request->input('title'),
+                'kind' => 'structured_question_set',
+                'html' => null,
+                'css' => null,
+                'js' => null,
+                'structured_json' => json_encode($payload),
+                'updated_at' => now(),
+            ]);
+        } else {
+            $request->validate([
+                'title' => 'required|string',
+                'html' => 'required|string',
+                'css' => 'required|string',
+                'js' => 'required|string',
+            ]);
+
+            $violations = $this->validatePackage([
+                'title' => $request->title,
+                'html' => $request->html,
+                'css' => $request->css,
+                'js' => $request->js,
+            ]);
+
+            if (!empty($violations)) {
+                return response()->json([
+                    'error' => 'Revision violates sandbox rules',
+                    'violations' => $violations,
+                ], 422);
+            }
+
+            DB::table('apps')->where('id', $appId)->update([
+                'title' => $request->title,
+                'kind' => 'open_interaction',
+                'html' => $request->html,
+                'css' => $request->css,
+                'js' => $request->js,
+                'structured_json' => null,
+                'updated_at' => now(),
+            ]);
+        }
 
         return response()->json(['success' => true]);
+    }
+
+    private function validateStructuredQuestion(array $q): ?string
+    {
+        $type = $q['question_type'] ?? null;
+        if (!is_string($type)) {
+            return 'Missing question_type';
+        }
+
+        if (!is_string($q['id'] ?? null) || !is_string($q['prompt_html'] ?? null)) {
+            return 'Structured question must include id and prompt_html';
+        }
+        if (!is_numeric($q['points_possible'] ?? null)) {
+            return 'Structured question must include numeric points_possible';
+        }
+
+        $validateOptions = function ($options): ?array {
+            if (!is_array($options) || count($options) < 2 || count($options) > 8) {
+                return null;
+            }
+            $ids = [];
+            foreach ($options as $option) {
+                if (!is_array($option) || !is_string($option['id'] ?? null) || !is_string($option['text'] ?? null)) {
+                    return null;
+                }
+                if (isset($ids[$option['id']])) {
+                    return null;
+                }
+                $ids[$option['id']] = true;
+            }
+            return array_keys($ids);
+        };
+
+        if ($type === 'multiple_choice_single_answer') {
+            $optionIds = $validateOptions($q['options'] ?? null);
+            if (!$optionIds) {
+                return 'multiple_choice_single_answer requires 2-8 valid options';
+            }
+            if (!is_string($q['correct_option_id'] ?? null) || !in_array($q['correct_option_id'], $optionIds, true)) {
+                return 'correct_option_id must match one option id';
+            }
+            return null;
+        }
+
+        if ($type === 'multiple_choice_multiple_answer') {
+            $optionIds = $validateOptions($q['options'] ?? null);
+            if (!$optionIds) {
+                return 'multiple_choice_multiple_answer requires 2-8 valid options';
+            }
+            $correct = $q['correct_option_ids'] ?? null;
+            if (!is_array($correct) || count($correct) < 1) {
+                return 'correct_option_ids must be a non-empty array';
+            }
+            $seen = [];
+            foreach ($correct as $id) {
+                if (!is_string($id) || !in_array($id, $optionIds, true) || isset($seen[$id])) {
+                    return 'correct_option_ids must be unique and match option ids';
+                }
+                $seen[$id] = true;
+            }
+            return null;
+        }
+
+        if ($type === 'matching') {
+            $promptIds = $validateOptions($q['prompts'] ?? null);
+            $choiceIds = $validateOptions($q['choices'] ?? null);
+            if (!$promptIds || !$choiceIds) {
+                return 'matching requires valid prompts and choices arrays';
+            }
+            $matches = $q['correct_matches'] ?? null;
+            if (!is_array($matches) || count($matches) !== count($promptIds)) {
+                return 'matching requires exactly one match per prompt';
+            }
+            $seenPrompt = [];
+            $seenChoice = [];
+            foreach ($matches as $match) {
+                if (!is_array($match)) {
+                    return 'matching contains invalid match record';
+                }
+                $promptId = $match['prompt_id'] ?? null;
+                $choiceId = $match['choice_id'] ?? null;
+                if (!is_string($promptId) || !in_array($promptId, $promptIds, true) || isset($seenPrompt[$promptId])) {
+                    return 'matching prompt_id must be unique and valid';
+                }
+                if (!is_string($choiceId) || !in_array($choiceId, $choiceIds, true) || isset($seenChoice[$choiceId])) {
+                    return 'matching choice_id must be unique and valid';
+                }
+                $seenPrompt[$promptId] = true;
+                $seenChoice[$choiceId] = true;
+            }
+            return null;
+        }
+
+        if ($type === 'fill_in_blank') {
+            $blanks = $q['blanks'] ?? null;
+            if (!is_array($blanks) || count($blanks) < 1 || count($blanks) > 8) {
+                return 'fill_in_blank requires 1-8 blanks';
+            }
+            $promptHtml = $q['prompt_html'];
+            $seenBlank = [];
+            foreach ($blanks as $blank) {
+                if (!is_array($blank)) {
+                    return 'fill_in_blank contains invalid blank';
+                }
+                $id = $blank['id'] ?? null;
+                $answers = $blank['acceptable_answers'] ?? null;
+                if (!is_string($id) || trim($id) === '' || isset($seenBlank[$id])) {
+                    return 'fill_in_blank blank IDs must be unique non-empty strings';
+                }
+                if (!is_array($answers) || count($answers) < 1) {
+                    return 'fill_in_blank blank acceptable_answers must be non-empty arrays';
+                }
+                foreach ($answers as $ans) {
+                    if (!is_string($ans) || trim($ans) === '') {
+                        return 'fill_in_blank acceptable_answers must contain non-empty strings';
+                    }
+                }
+                if (!str_contains($promptHtml, '[[' . $id . ']]')) {
+                    return 'fill_in_blank prompt_html must include each [[blank_id]] token';
+                }
+                $seenBlank[$id] = true;
+            }
+            return null;
+        }
+
+        if ($type === 'ordering') {
+            $itemIds = $validateOptions($q['items'] ?? null);
+            if (!$itemIds) {
+                return 'ordering requires 2-8 valid items';
+            }
+            $order = $q['correct_order'] ?? null;
+            if (!is_array($order) || count($order) !== count($itemIds)) {
+                return 'ordering correct_order must include each item id exactly once';
+            }
+            $seen = [];
+            foreach ($order as $id) {
+                if (!is_string($id) || !in_array($id, $itemIds, true) || isset($seen[$id])) {
+                    return 'ordering correct_order contains invalid or duplicate item id';
+                }
+                $seen[$id] = true;
+            }
+            return null;
+        }
+
+        if ($type === 'numeric') {
+            $mode = $q['answer_mode'] ?? null;
+            if (!is_string($mode) || !in_array($mode, ['exact', 'tolerance'], true)) {
+                return 'numeric answer_mode must be exact or tolerance';
+            }
+            if ($mode === 'exact') {
+                if (!is_numeric($q['correct_value'] ?? null)) {
+                    return 'numeric exact mode requires correct_value';
+                }
+                return null;
+            }
+            $hasTargetTolerance = is_numeric($q['target_value'] ?? null) && is_numeric($q['tolerance'] ?? null);
+            $hasRange = is_numeric($q['min_value'] ?? null) && is_numeric($q['max_value'] ?? null);
+            if (!$hasTargetTolerance && !$hasRange) {
+                return 'numeric tolerance mode requires target+tolerance or min/max';
+            }
+            if ($hasTargetTolerance && ((float) $q['tolerance']) < 0) {
+                return 'numeric tolerance must be >= 0';
+            }
+            if ($hasRange && ((float) $q['min_value']) > ((float) $q['max_value'])) {
+                return 'numeric min_value must be <= max_value';
+            }
+            return null;
+        }
+
+        return 'Unsupported structured question type';
     }
 
     private function validatePackage(array $pkg): array

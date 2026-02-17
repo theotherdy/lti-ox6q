@@ -3,24 +3,37 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class GenerateAppController extends Controller
 {
-    /**
-     * Call the LLM and parse the JSON response
-     *
-     * @param array $messages The messages to send to the LLM
-     * @return array{package: array|null, error: string|null, raw: string|null}
-     */
+    private const KIND_OPEN_INTERACTION = 'open_interaction';
+    private const KIND_STRUCTURED_QUESTION_SET = 'structured_question_set';
+    private const SCHEMA_VERSION = '2026-02-06';
+
+    private const QUESTION_TYPE_MC_SINGLE = 'multiple_choice_single_answer';
+    private const QUESTION_TYPE_MC_MULTIPLE = 'multiple_choice_multiple_answer';
+    private const QUESTION_TYPE_MATCHING = 'matching';
+    private const QUESTION_TYPE_FILL_IN_BLANK = 'fill_in_blank';
+    private const QUESTION_TYPE_ORDERING = 'ordering';
+    private const QUESTION_TYPE_NUMERIC = 'numeric';
+
+    private const STRUCTURED_TYPES = [
+        self::QUESTION_TYPE_MC_SINGLE,
+        self::QUESTION_TYPE_MC_MULTIPLE,
+        self::QUESTION_TYPE_MATCHING,
+        self::QUESTION_TYPE_FILL_IN_BLANK,
+        self::QUESTION_TYPE_ORDERING,
+        self::QUESTION_TYPE_NUMERIC,
+    ];
+
     private function callLLM(array $messages): array
     {
         $startTime = microtime(true);
 
         try {
-            /** @var \Illuminate\Http\Client\Response $res */
             $res = Http::withToken(config('services.openai.key'))
                 ->timeout(90)
                 ->retry(2, 1000)
@@ -49,7 +62,6 @@ class GenerateAppController extends Controller
             ]);
 
             $text = $responseData['choices'][0]['message']['content'] ?? '';
-
         } catch (\Illuminate\Http\Client\ConnectionException $e) {
             $duration = microtime(true) - $startTime;
             Log::error('OpenAI API connection error', [
@@ -57,7 +69,6 @@ class GenerateAppController extends Controller
                 'duration' => round($duration, 2) . 's',
             ]);
             return ['package' => null, 'error' => 'Unable to connect to AI service. Please check your connection and try again.', 'raw' => null];
-
         } catch (\Exception $e) {
             $duration = microtime(true) - $startTime;
             Log::error('Unexpected error during OpenAI API request', [
@@ -74,9 +85,7 @@ class GenerateAppController extends Controller
             return ['package' => null, 'error' => 'OpenAI returned no content', 'raw' => null];
         }
 
-        // Parse the JSON response
         $package = $this->parseJsonResponse($text);
-
         if (!$package) {
             Log::warning('Failed to parse LLM JSON', ['raw' => $text]);
             return ['package' => null, 'error' => 'LLM output could not be parsed as JSON', 'raw' => $text];
@@ -85,30 +94,23 @@ class GenerateAppController extends Controller
         return ['package' => $package, 'error' => null, 'raw' => $text];
     }
 
-    /**
-     * Parse JSON from LLM response, handling markdown fences
-     */
     private function parseJsonResponse(string $text): ?array
     {
-        // 1) Try direct decode first
         $decoded = json_decode($text, true);
         if (is_array($decoded)) {
             return $decoded;
         }
 
-        // 2) Strip Markdown fences if present
         $clean = trim($text);
         $clean = preg_replace('/^```(?:json)?/i', '', $clean);
         $clean = preg_replace('/```$/', '', $clean);
         $clean = trim($clean);
 
-        // 3) Try decode again
         $decoded = json_decode($clean, true);
         if (is_array($decoded)) {
             return $decoded;
         }
 
-        // 4) Last resort: extract first JSON object
         if (preg_match('/\{.*\}/s', $clean, $m)) {
             $decoded = json_decode($m[0], true);
             if (is_array($decoded)) {
@@ -119,48 +121,38 @@ class GenerateAppController extends Controller
         return null;
     }
 
-    //violations detrerministrically chceked for
     private function validatePackage(array $pkg): array
     {
         $violations = [];
 
         $html = $pkg['html'] ?? '';
-        $js   = $pkg['js']   ?? '';
+        $js = $pkg['js'] ?? '';
 
-        // ---- HTML checks ----
         if (stripos($html, '<form') !== false) {
             $violations[] = 'HTML forms are not allowed (use JavaScript handlers instead)';
         }
-
         if (stripos($html, 'action=') !== false) {
             $violations[] = 'Form action attributes are not allowed';
         }
-
         if (stripos($html, '<script') !== false && stripos($html, '<script src') !== false) {
             $violations[] = 'External script tags are not allowed';
         }
-
         if (stripos($html, '<iframe') !== false) {
             $violations[] = 'Nested iframes are not allowed';
         }
 
-        // ---- JS checks ----
         if (stripos($js, 'fetch(') !== false) {
             $violations[] = 'Network access via fetch() is not allowed';
         }
-
         if (stripos($js, 'XMLHttpRequest') !== false) {
             $violations[] = 'Network access via XMLHttpRequest is not allowed';
         }
-
         if (stripos($js, 'window.location') !== false) {
             $violations[] = 'Navigation via window.location is not allowed';
         }
-
         if (stripos($js, 'document.cookie') !== false) {
             $violations[] = 'Accessing cookies is not allowed';
         }
-
         if (stripos($js, 'localStorage') !== false || stripos($js, 'sessionStorage') !== false) {
             $violations[] = 'Browser storage APIs are not allowed (use sdk.getState/setState)';
         }
@@ -168,27 +160,675 @@ class GenerateAppController extends Controller
         return $violations;
     }
 
-
-
-
-    public function generate(Request $request)
+    private function classifyPrompt(string $prompt): array
     {
-        $request->validate([
-            'prompt' => 'required|string|max:10000',
-            'app_id' => 'nullable|integer|exists:apps,id',
-            'preview' => 'nullable|boolean',
+        $types = implode(' | ', array_map(fn($t) => '"' . $t . '"', self::STRUCTURED_TYPES));
+        $system = <<<SYS
+You classify user prompts for a learning tool.
+
+Return ONLY valid JSON with this shape:
+{
+  "mode": "structured_question_set" | "open_interaction",
+  "question_type": {$types} | "unsupported",
+  "confidence": number
+}
+
+Rules:
+- Route essay/open-ended writing prompts to open_interaction with unsupported.
+- Route only the supported auto-marked question types to structured_question_set.
+- confidence must be 0..1.
+SYS;
+
+        $result = $this->callLLM([
+            ['role' => 'system', 'content' => $system],
+            ['role' => 'user', 'content' => "Prompt:\n{$prompt}"],
         ]);
 
-        // Fetch existing app if this is a revision
-        $existingApp = null;
-        if ($request->has('app_id')) {
-            $existingApp = DB::table('apps')->where('id', $request->app_id)->first();
-            if (!$existingApp) {
-                return response()->json(['error' => 'App not found'], 404);
-            }
+        if ($result['error'] || !is_array($result['package'])) {
+            return ['mode' => self::KIND_OPEN_INTERACTION, 'question_type' => 'unsupported', 'confidence' => 0.0];
         }
 
-        // Build context-aware prompts for revision vs new generation
+        $payload = $result['package'];
+        $mode = $payload['mode'] ?? self::KIND_OPEN_INTERACTION;
+        $questionType = $payload['question_type'] ?? 'unsupported';
+        $confidence = $payload['confidence'] ?? 0;
+
+        if (!in_array($mode, [self::KIND_STRUCTURED_QUESTION_SET, self::KIND_OPEN_INTERACTION], true)) {
+            $mode = self::KIND_OPEN_INTERACTION;
+        }
+        if (!in_array($questionType, array_merge(self::STRUCTURED_TYPES, ['unsupported']), true)) {
+            $questionType = 'unsupported';
+        }
+        if (!is_numeric($confidence)) {
+            $confidence = 0;
+        }
+
+        return [
+            'mode' => $mode,
+            'question_type' => $questionType,
+            'confidence' => max(0.0, min(1.0, (float) $confidence)),
+        ];
+    }
+
+    private function detectQuestionTypeByHeuristic(string $prompt): string
+    {
+        $p = mb_strtolower($prompt);
+
+        if (preg_match('/\b(essay|long\s*answer|short\s*answer|free\s*text|open\s*ended)\b/u', $p)) {
+            return 'unsupported';
+        }
+        if (preg_match('/\b(multiple\s*answer|select\s*all|more\s*than\s*one)\b/u', $p)) {
+            return self::QUESTION_TYPE_MC_MULTIPLE;
+        }
+        if (preg_match('/\b(multiple\s*choice|single\s*best\s*answer|single\s*choice|mcq)\b/u', $p)) {
+            return self::QUESTION_TYPE_MC_SINGLE;
+        }
+        if (preg_match('/\b(match(?:ing)?|pair(?:ing)?)\b/u', $p)) {
+            return self::QUESTION_TYPE_MATCHING;
+        }
+        if (preg_match('/\b(fill\s*in\s*the\s*blank|fill\s*in\s*the\s*blanks|cloze|blank)\b/u', $p)) {
+            return self::QUESTION_TYPE_FILL_IN_BLANK;
+        }
+        if (preg_match('/\b(order(?:ing)?|sequence|arrange)\b/u', $p)) {
+            return self::QUESTION_TYPE_ORDERING;
+        }
+        if (preg_match('/\b(numeric|number|calculate|calculation|tolerance|range)\b/u', $p)) {
+            return self::QUESTION_TYPE_NUMERIC;
+        }
+
+        return 'unsupported';
+    }
+
+    private function classifyPromptForRouting(string $prompt): array
+    {
+        $heuristicType = $this->detectQuestionTypeByHeuristic($prompt);
+        if ($heuristicType !== 'unsupported') {
+            return [
+                'mode' => self::KIND_STRUCTURED_QUESTION_SET,
+                'question_type' => $heuristicType,
+                'confidence' => 0.98,
+                'source' => 'heuristic',
+            ];
+        }
+
+        $classification = $this->classifyPrompt($prompt);
+        $classification['source'] = 'llm';
+        return $classification;
+    }
+
+    private function detectExplicitStructuredTypeSwitch(string $prompt): ?string
+    {
+        $type = $this->detectQuestionTypeByHeuristic($prompt);
+        if ($type === 'unsupported') {
+            return null;
+        }
+        return $type;
+    }
+
+    private function buildStructuredSystemPrompt(string $questionType, ?array $existingStructured = null): string
+    {
+        $existingPart = '';
+        $revisionRule = '- Create a new question set from scratch.';
+        if ($existingStructured) {
+            $existingJson = json_encode($existingStructured, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            $existingPart = "CURRENT QUESTION SET:\n{$existingJson}\n\n";
+            $revisionRule = '- Apply only requested changes and preserve all other fields unless explicitly changed.';
+        }
+
+        $common = <<<TXT
+Return ONLY valid JSON with shape:
+{
+  "title": string,
+  "questions": [ { ... } ],
+  "meta": {"mode": "self_test"}
+}
+
+Global constraints:
+- Exactly one item in questions.
+- Do not wrap JSON in markdown.
+- Do not include commentary outside JSON.
+{$revisionRule}
+TXT;
+
+        $typeSchema = match ($questionType) {
+            self::QUESTION_TYPE_MC_SINGLE => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "multiple_choice_single_answer",
+  "prompt_html": string,
+  "options": [{"id": string, "text": string}],
+  "points_possible": number,
+  "shuffle_options": boolean,
+  "correct_option_id": string
+}
+Constraints:
+- options: 2..8 unique IDs.
+- correct_option_id must match one option id.
+TXT,
+            self::QUESTION_TYPE_MC_MULTIPLE => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "multiple_choice_multiple_answer",
+  "prompt_html": string,
+  "options": [{"id": string, "text": string}],
+  "points_possible": number,
+  "shuffle_options": boolean,
+  "correct_option_ids": [string]
+}
+Constraints:
+- options: 2..8 unique IDs.
+- correct_option_ids: non-empty, unique, subset of option IDs.
+TXT,
+            self::QUESTION_TYPE_MATCHING => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "matching",
+  "prompt_html": string,
+  "prompts": [{"id": string, "text": string}],
+  "choices": [{"id": string, "text": string}],
+  "correct_matches": [{"prompt_id": string, "choice_id": string}],
+  "points_possible": number,
+  "shuffle_options": boolean
+}
+Constraints:
+- prompts/choices count: 2..8 each.
+- one-to-one mapping: exactly one match per prompt and no duplicated choice_id.
+TXT,
+            self::QUESTION_TYPE_FILL_IN_BLANK => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "fill_in_blank",
+  "prompt_html": string,
+  "blanks": [{"id": string, "acceptable_answers": [string]}],
+  "points_possible": number,
+  "shuffle_options": false
+}
+Constraints:
+- Use placeholder tokens in prompt_html: [[blank_id]].
+- blanks count: 1..8.
+- each blank id must appear in prompt_html.
+- acceptable_answers must be non-empty.
+TXT,
+            self::QUESTION_TYPE_ORDERING => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "ordering",
+  "prompt_html": string,
+  "items": [{"id": string, "text": string}],
+  "correct_order": [string],
+  "points_possible": number,
+  "shuffle_options": true
+}
+Constraints:
+- items count: 2..8 with unique IDs.
+- correct_order contains each item id exactly once.
+TXT,
+            self::QUESTION_TYPE_NUMERIC => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "numeric",
+  "prompt_html": string,
+  "answer_mode": "exact" | "tolerance",
+  "correct_value": number,
+  "target_value": number,
+  "tolerance": number,
+  "min_value": number,
+  "max_value": number,
+  "points_possible": number,
+  "shuffle_options": false
+}
+Constraints:
+- If answer_mode=exact, provide correct_value.
+- If answer_mode=tolerance, provide either:
+  A) target_value and tolerance (>=0), OR
+  B) min_value and max_value with min_value <= max_value.
+TXT,
+            default => ''
+        };
+
+        return "You generate structured quiz data for a learning tool.\n\n{$existingPart}{$common}\n\n{$typeSchema}";
+    }
+
+    private function generateStructuredQuestionSet(
+        string $prompt,
+        float $confidence,
+        string $questionType,
+        ?array $existingStructured = null
+    ): ?array {
+        $system = $this->buildStructuredSystemPrompt($questionType, $existingStructured);
+        $action = $existingStructured ? 'Revise the current question set according to this request:' : 'Create a question set according to this request:';
+
+        $result = $this->callLLM([
+            ['role' => 'system', 'content' => $system],
+            ['role' => 'user', 'content' => "{$action}\n{$prompt}"],
+        ]);
+
+        if ($result['error'] || !is_array($result['package'])) {
+            return null;
+        }
+
+        return $this->normalizeStructuredQuestionSetByType(
+            $result['package'],
+            $questionType,
+            $confidence,
+            $existingStructured
+        );
+    }
+
+    private function normalizeStructuredQuestionSetByType(
+        array $payload,
+        string $questionType,
+        float $confidence,
+        ?array $existingStructured = null
+    ): ?array {
+        $title = $payload['title'] ?? ($existingStructured['title'] ?? 'Generated question');
+        if (!is_string($title) || trim($title) === '') {
+            $title = 'Generated question';
+        }
+
+        $questions = $payload['questions'] ?? null;
+        if (!is_array($questions) || count($questions) !== 1 || !is_array($questions[0])) {
+            return null;
+        }
+
+        $normalizedQuestion = match ($questionType) {
+            self::QUESTION_TYPE_MC_SINGLE => $this->normalizeQuestionMcSingle($questions[0]),
+            self::QUESTION_TYPE_MC_MULTIPLE => $this->normalizeQuestionMcMultiple($questions[0]),
+            self::QUESTION_TYPE_MATCHING => $this->normalizeQuestionMatching($questions[0]),
+            self::QUESTION_TYPE_FILL_IN_BLANK => $this->normalizeQuestionFillInBlank($questions[0]),
+            self::QUESTION_TYPE_ORDERING => $this->normalizeQuestionOrdering($questions[0]),
+            self::QUESTION_TYPE_NUMERIC => $this->normalizeQuestionNumeric($questions[0]),
+            default => null,
+        };
+
+        if (!$normalizedQuestion) {
+            return null;
+        }
+
+        return [
+            'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+            'schema_version' => self::SCHEMA_VERSION,
+            'title' => $title,
+            'questions' => [$normalizedQuestion],
+            'meta' => [
+                'mode' => 'self_test',
+                'classification_confidence' => max(0.0, min(1.0, $confidence)),
+            ],
+        ];
+    }
+
+    private function normalizeQuestionBase(array $q, string $expectedType): ?array
+    {
+        if (($q['question_type'] ?? null) !== $expectedType) {
+            return null;
+        }
+
+        $id = $q['id'] ?? 'q_001';
+        $promptHtml = $q['prompt_html'] ?? '';
+        $pointsPossible = $q['points_possible'] ?? 1;
+
+        if (!is_string($id) || trim($id) === '') {
+            $id = 'q_001';
+        }
+        if (!is_string($promptHtml) || trim($promptHtml) === '') {
+            return null;
+        }
+        if (!is_numeric($pointsPossible) || (float) $pointsPossible <= 0) {
+            $pointsPossible = 1;
+        }
+
+        return [
+            'id' => $id,
+            'question_type' => $expectedType,
+            'prompt_html' => $promptHtml,
+            'points_possible' => (float) $pointsPossible,
+        ];
+    }
+
+    private function normalizeOptions(array $options, int $min = 2, int $max = 8): ?array
+    {
+        if (count($options) < $min || count($options) > $max) {
+            return null;
+        }
+
+        $ids = [];
+        $normalized = [];
+        foreach ($options as $idx => $option) {
+            if (!is_array($option)) {
+                return null;
+            }
+            $id = $option['id'] ?? ('opt_' . ($idx + 1));
+            $text = $option['text'] ?? null;
+            if (!is_string($id) || trim($id) === '' || isset($ids[$id])) {
+                return null;
+            }
+            if (!is_string($text) || trim($text) === '') {
+                return null;
+            }
+            $ids[$id] = true;
+            $normalized[] = ['id' => $id, 'text' => $text];
+        }
+
+        return $normalized;
+    }
+
+    private function normalizeQuestionMcSingle(array $q): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MC_SINGLE);
+        if (!$base) {
+            return null;
+        }
+
+        $options = $q['options'] ?? null;
+        if (!is_array($options)) {
+            return null;
+        }
+        $options = $this->normalizeOptions($options);
+        if (!$options) {
+            return null;
+        }
+
+        $correct = $q['correct_option_id'] ?? null;
+        $optionIds = array_column($options, 'id');
+        if (!is_string($correct) || !in_array($correct, $optionIds, true)) {
+            return null;
+        }
+
+        $shuffle = $q['shuffle_options'] ?? false;
+        if (!is_bool($shuffle)) {
+            $shuffle = false;
+        }
+
+        return array_merge($base, [
+            'options' => $options,
+            'shuffle_options' => $shuffle,
+            'correct_option_id' => $correct,
+        ]);
+    }
+
+    private function normalizeQuestionMcMultiple(array $q): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MC_MULTIPLE);
+        if (!$base) {
+            return null;
+        }
+
+        $options = $q['options'] ?? null;
+        if (!is_array($options)) {
+            return null;
+        }
+        $options = $this->normalizeOptions($options);
+        if (!$options) {
+            return null;
+        }
+
+        $correct = $q['correct_option_ids'] ?? null;
+        if (!is_array($correct) || count($correct) < 1) {
+            return null;
+        }
+
+        $optionIds = array_flip(array_column($options, 'id'));
+        $seen = [];
+        $normalizedCorrect = [];
+        foreach ($correct as $cid) {
+            if (!is_string($cid) || !isset($optionIds[$cid]) || isset($seen[$cid])) {
+                return null;
+            }
+            $seen[$cid] = true;
+            $normalizedCorrect[] = $cid;
+        }
+
+        $shuffle = $q['shuffle_options'] ?? false;
+        if (!is_bool($shuffle)) {
+            $shuffle = false;
+        }
+
+        return array_merge($base, [
+            'options' => $options,
+            'shuffle_options' => $shuffle,
+            'correct_option_ids' => $normalizedCorrect,
+        ]);
+    }
+
+    private function normalizeQuestionMatching(array $q): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MATCHING);
+        if (!$base) {
+            return null;
+        }
+
+        $prompts = $q['prompts'] ?? null;
+        $choices = $q['choices'] ?? null;
+        $matches = $q['correct_matches'] ?? null;
+
+        if (!is_array($prompts) || !is_array($choices) || !is_array($matches)) {
+            return null;
+        }
+
+        $prompts = $this->normalizeOptions($prompts);
+        $choices = $this->normalizeOptions($choices);
+        if (!$prompts || !$choices) {
+            return null;
+        }
+
+        if (count($matches) !== count($prompts)) {
+            return null;
+        }
+
+        $promptIds = array_flip(array_column($prompts, 'id'));
+        $choiceIds = array_flip(array_column($choices, 'id'));
+        $usedPrompts = [];
+        $usedChoices = [];
+        $normalizedMatches = [];
+
+        foreach ($matches as $m) {
+            if (!is_array($m)) {
+                return null;
+            }
+            $promptId = $m['prompt_id'] ?? null;
+            $choiceId = $m['choice_id'] ?? null;
+            if (!is_string($promptId) || !isset($promptIds[$promptId]) || isset($usedPrompts[$promptId])) {
+                return null;
+            }
+            if (!is_string($choiceId) || !isset($choiceIds[$choiceId]) || isset($usedChoices[$choiceId])) {
+                return null;
+            }
+            $usedPrompts[$promptId] = true;
+            $usedChoices[$choiceId] = true;
+            $normalizedMatches[] = ['prompt_id' => $promptId, 'choice_id' => $choiceId];
+        }
+
+        $shuffle = $q['shuffle_options'] ?? true;
+        if (!is_bool($shuffle)) {
+            $shuffle = true;
+        }
+
+        return array_merge($base, [
+            'prompts' => $prompts,
+            'choices' => $choices,
+            'correct_matches' => $normalizedMatches,
+            'shuffle_options' => $shuffle,
+        ]);
+    }
+
+    private function normalizeQuestionFillInBlank(array $q): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_FILL_IN_BLANK);
+        if (!$base) {
+            return null;
+        }
+
+        $blanks = $q['blanks'] ?? null;
+        if (!is_array($blanks) || count($blanks) < 1 || count($blanks) > 8) {
+            return null;
+        }
+
+        $normalized = [];
+        $seen = [];
+        foreach ($blanks as $blank) {
+            if (!is_array($blank)) {
+                return null;
+            }
+            $id = $blank['id'] ?? null;
+            $answers = $blank['acceptable_answers'] ?? null;
+            if (!is_string($id) || trim($id) === '' || isset($seen[$id])) {
+                return null;
+            }
+            if (!is_array($answers) || count($answers) < 1) {
+                return null;
+            }
+
+            $normAnswers = [];
+            foreach ($answers as $a) {
+                if (!is_string($a) || trim($a) === '') {
+                    return null;
+                }
+                $normAnswers[] = $a;
+            }
+
+            if (!str_contains($base['prompt_html'], '[[' . $id . ']]')) {
+                return null;
+            }
+
+            $seen[$id] = true;
+            $normalized[] = ['id' => $id, 'acceptable_answers' => $normAnswers];
+        }
+
+        return array_merge($base, [
+            'blanks' => $normalized,
+            'shuffle_options' => false,
+        ]);
+    }
+
+    private function normalizeQuestionOrdering(array $q): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_ORDERING);
+        if (!$base) {
+            return null;
+        }
+
+        $items = $q['items'] ?? null;
+        $order = $q['correct_order'] ?? null;
+        if (!is_array($items) || !is_array($order)) {
+            return null;
+        }
+
+        $items = $this->normalizeOptions($items);
+        if (!$items || count($order) !== count($items)) {
+            return null;
+        }
+
+        $ids = array_flip(array_column($items, 'id'));
+        $seen = [];
+        $normalizedOrder = [];
+        foreach ($order as $id) {
+            if (!is_string($id) || !isset($ids[$id]) || isset($seen[$id])) {
+                return null;
+            }
+            $seen[$id] = true;
+            $normalizedOrder[] = $id;
+        }
+
+        return array_merge($base, [
+            'items' => $items,
+            'correct_order' => $normalizedOrder,
+            'shuffle_options' => true,
+        ]);
+    }
+
+    private function normalizeQuestionNumeric(array $q): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_NUMERIC);
+        if (!$base) {
+            return null;
+        }
+
+        $answerMode = $q['answer_mode'] ?? null;
+        if (!is_string($answerMode) || !in_array($answerMode, ['exact', 'tolerance'], true)) {
+            return null;
+        }
+
+        $normalized = array_merge($base, [
+            'answer_mode' => $answerMode,
+            'shuffle_options' => false,
+        ]);
+
+        if ($answerMode === 'exact') {
+            if (!is_numeric($q['correct_value'] ?? null)) {
+                return null;
+            }
+            $normalized['correct_value'] = (float) $q['correct_value'];
+            return $normalized;
+        }
+
+        $hasTargetTolerance = is_numeric($q['target_value'] ?? null) && is_numeric($q['tolerance'] ?? null);
+        $hasRange = is_numeric($q['min_value'] ?? null) && is_numeric($q['max_value'] ?? null);
+
+        if (!$hasTargetTolerance && !$hasRange) {
+            return null;
+        }
+
+        if ($hasTargetTolerance) {
+            $tolerance = (float) $q['tolerance'];
+            if ($tolerance < 0) {
+                return null;
+            }
+            $normalized['target_value'] = (float) $q['target_value'];
+            $normalized['tolerance'] = $tolerance;
+            return $normalized;
+        }
+
+        $min = (float) $q['min_value'];
+        $max = (float) $q['max_value'];
+        if ($min > $max) {
+            return null;
+        }
+
+        $normalized['min_value'] = $min;
+        $normalized['max_value'] = $max;
+
+        return $normalized;
+    }
+
+    private function mapResourceLink(?int $appId, Request $request): void
+    {
+        if (!$appId) {
+            return;
+        }
+
+        $auth = $request->attributes->get('auth');
+        $lti = is_array($auth) ? ($auth['lti'] ?? null) : null;
+        $issuer = is_array($lti) ? ($lti['issuer'] ?? null) : null;
+        $deploymentId = is_array($lti) ? ($lti['deployment_id'] ?? null) : null;
+        $resourceLinkId = is_array($lti) ? ($lti['resource_link_id'] ?? null) : null;
+
+        if (is_string($issuer) && $issuer !== '' &&
+            is_string($deploymentId) && $deploymentId !== '' &&
+            is_string($resourceLinkId) && $resourceLinkId !== '') {
+            $now = now();
+            DB::table('resource_links')->updateOrInsert(
+                [
+                    'issuer' => $issuer,
+                    'deployment_id' => $deploymentId,
+                    'resource_link_id' => $resourceLinkId,
+                ],
+                [
+                    'app_id' => $appId,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]
+            );
+        }
+    }
+
+    private function generateOpenInteractionPackage(Request $request, ?object $existingApp): array
+    {
         if ($existingApp) {
             $system = <<<SYS
 You are revising an existing learning application in a sandboxed iframe.
@@ -247,49 +887,28 @@ Return JSON only.
 USR;
         }
 
-        // Log the API request attempt with full details
-        Log::info('OpenAI API request initiated', [
+        Log::info('Open interaction generation initiated', [
             'prompt_length' => strlen($request->prompt),
             'model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
             'temperature' => env('OPENAI_TEMPERATURE', 0.3),
-            'is_revision' => (bool)$existingApp,
+            'is_revision' => (bool) $existingApp,
         ]);
 
-        // Log exactly what's being sent to the LLM (for debugging)
-        Log::debug('LLM request payload', [
-            'system_message' => $system,
-            'user_message' => $user,
-        ]);
-
-        // Build initial messages
         $messages = [
             ['role' => 'system', 'content' => $system],
             ['role' => 'user', 'content' => $user],
         ];
 
-        // First attempt
         $result = $this->callLLM($messages);
-
         if ($result['error']) {
-            $statusCode = $result['raw'] ? 500 : ($result['error'] === 'Unable to connect to AI service. Please check your connection and try again.' ? 503 : 500);
-            return response()->json([
-                'error' => $result['error'],
-                'raw' => $result['raw'],
-            ], $statusCode);
+            return ['error' => $result['error'], 'status' => 500];
         }
 
         $package = $result['package'];
         $violations = $this->validatePackage($package);
         $didAutoRetry = false;
 
-        // If validation failed, try ONE automatic retry with feedback
         if (!empty($violations)) {
-            Log::info('LLM output failed validation, attempting auto-retry', [
-                'violations' => $violations,
-                'package' => $package,
-            ]);
-
-            // Build correction message
             $violationsList = implode("\n- ", $violations);
             $correctionMessage = <<<MSG
 Your previous output violated sandbox rules:
@@ -304,107 +923,181 @@ Please fix these issues and return the corrected JSON. Remember:
 Return the complete fixed JSON only.
 MSG;
 
-            // Add the assistant's response and our correction to the conversation
             $messages[] = ['role' => 'assistant', 'content' => $result['raw']];
             $messages[] = ['role' => 'user', 'content' => $correctionMessage];
 
-            Log::info('Auto-retry initiated for validation failure');
-            Log::debug('LLM retry request payload', [
-                'correction_message' => $correctionMessage,
-            ]);
-
-            // Retry
             $retryResult = $this->callLLM($messages);
-
             if ($retryResult['error']) {
-                // Retry failed, return original validation error
-                return response()->json([
-                    'error' => 'Generated app violates sandbox rules (auto-retry also failed)',
-                    'violations' => $violations,
-                ], 422);
+                return ['error' => 'Generated app violates sandbox rules (auto-retry also failed)', 'status' => 422, 'violations' => $violations];
             }
 
             $retryPackage = $retryResult['package'];
             $retryViolations = $this->validatePackage($retryPackage);
-
             if (!empty($retryViolations)) {
-                Log::info('LLM auto-retry still failed validation', [
-                    'violations' => $retryViolations,
-                    'package' => $retryPackage,
-                ]);
-
-                return response()->json([
-                    'error' => 'Generated app violates sandbox rules',
-                    'violations' => $retryViolations,
-                    'auto_retry_attempted' => true,
-                ], 422);
+                return ['error' => 'Generated app violates sandbox rules', 'status' => 422, 'violations' => $retryViolations, 'auto_retry_attempted' => true];
             }
 
-            // Retry succeeded!
-            Log::info('LLM auto-retry succeeded');
             $package = $retryPackage;
             $didAutoRetry = true;
         }
 
+        return [
+            'status' => 200,
+            'kind' => self::KIND_OPEN_INTERACTION,
+            'package' => $package,
+            'did_auto_retry' => $didAutoRetry,
+        ];
+    }
 
-        // Only persist if not in preview mode
-        $preview = $request->input('preview', false);
+    public function generate(Request $request)
+    {
+        $request->validate([
+            'prompt' => 'required|string|max:10000',
+            'app_id' => 'nullable|integer|exists:apps,id',
+            'preview' => 'nullable|boolean',
+        ]);
+
+        $preview = (bool) $request->input('preview', false);
+        $existingApp = null;
+
+        if ($request->has('app_id')) {
+            $existingApp = DB::table('apps')->where('id', $request->app_id)->first();
+            if (!$existingApp) {
+                return response()->json(['error' => 'App not found'], 404);
+            }
+        }
+
+        $existingStructured = null;
+        if ($existingApp && ($existingApp->kind ?? self::KIND_OPEN_INTERACTION) === self::KIND_STRUCTURED_QUESTION_SET) {
+            $decoded = json_decode((string) ($existingApp->structured_json ?? ''), true);
+            if (is_array($decoded)) {
+                $existingStructured = $decoded;
+            }
+        }
+
+        if ($existingStructured) {
+            $existingType = $existingStructured['questions'][0]['question_type'] ?? self::QUESTION_TYPE_MC_SINGLE;
+            $switchType = $this->detectExplicitStructuredTypeSwitch($request->prompt);
+            $questionType = $switchType ?: $existingType;
+
+            if (!in_array($questionType, self::STRUCTURED_TYPES, true)) {
+                $questionType = $existingType;
+            }
+
+            $classification = [
+                'mode' => self::KIND_STRUCTURED_QUESTION_SET,
+                'question_type' => $questionType,
+                'confidence' => 1.0,
+                'source' => 'existing_kind',
+            ];
+        } else {
+            $classification = $this->classifyPromptForRouting($request->prompt);
+        }
+
+        Log::info('Generation route classification', [
+            'mode' => $classification['mode'] ?? null,
+            'question_type' => $classification['question_type'] ?? null,
+            'confidence' => $classification['confidence'] ?? null,
+            'source' => $classification['source'] ?? null,
+            'has_existing_app' => (bool) $existingApp,
+            'preview' => $preview,
+        ]);
+
+        if (($classification['mode'] ?? null) === self::KIND_STRUCTURED_QUESTION_SET
+            && in_array(($classification['question_type'] ?? null), self::STRUCTURED_TYPES, true)) {
+            $questionType = $classification['question_type'];
+            $structured = $this->generateStructuredQuestionSet(
+                $request->prompt,
+                (float) ($classification['confidence'] ?? 0),
+                $questionType,
+                $existingStructured
+            );
+
+            if ($structured !== null) {
+                $appId = $existingApp ? (int) $existingApp->id : null;
+
+                if (!$preview) {
+                    if ($existingApp) {
+                        DB::table('apps')->where('id', $existingApp->id)->update([
+                            'title' => $structured['title'],
+                            'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+                            'html' => null,
+                            'css' => null,
+                            'js' => null,
+                            'structured_json' => json_encode($structured),
+                            'updated_at' => now(),
+                        ]);
+                        $appId = (int) $existingApp->id;
+                    } else {
+                        $appId = DB::table('apps')->insertGetId([
+                            'title' => $structured['title'],
+                            'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+                            'html' => null,
+                            'css' => null,
+                            'js' => null,
+                            'structured_json' => json_encode($structured),
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
+                }
+
+                $this->mapResourceLink($appId, $request);
+
+                return response()->json([
+                    'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+                    'schema_version' => $structured['schema_version'],
+                    'id' => $appId,
+                    'title' => $structured['title'],
+                    'questions' => $structured['questions'],
+                    'meta' => $structured['meta'],
+                ]);
+            }
+
+            Log::warning('Structured question generation failed validation; falling back to open interaction', [
+                'prompt' => $request->prompt,
+                'classification' => $classification,
+            ]);
+        }
+
+        $openResult = $this->generateOpenInteractionPackage($request, $existingApp);
+        if (($openResult['status'] ?? 500) !== 200) {
+            return response()->json($openResult, $openResult['status'] ?? 500);
+        }
+
+        $package = $openResult['package'];
+        $appId = $existingApp ? (int) $existingApp->id : null;
 
         if (!$preview) {
-            // Persist or update the app
             if ($existingApp) {
-                // Update existing app
                 DB::table('apps')->where('id', $existingApp->id)->update([
                     'title' => $package['title'] ?? $existingApp->title,
+                    'kind' => self::KIND_OPEN_INTERACTION,
                     'html' => $package['html'] ?? '',
                     'css' => $package['css'] ?? '',
                     'js' => $package['js'] ?? '',
+                    'structured_json' => null,
                     'updated_at' => now(),
                 ]);
-                $appId = $existingApp->id;
+                $appId = (int) $existingApp->id;
             } else {
-                // Insert new app
                 $appId = DB::table('apps')->insertGetId([
                     'title' => $package['title'] ?? 'Generated app',
+                    'kind' => self::KIND_OPEN_INTERACTION,
                     'html' => $package['html'] ?? "<div id='app'></div>",
                     'css' => $package['css'] ?? '',
                     'js' => $package['js'] ?? '',
+                    'structured_json' => null,
                     'created_at' => now(),
                     'updated_at' => now(),
                 ]);
             }
-        } else {
-            // Preview mode - don't persist, just return the package
-            $appId = $existingApp ? $existingApp->id : null;
         }
 
-        // If we have LTI context, map this app to the resource link
-        $auth = $request->attributes->get('auth');
-        $lti = is_array($auth) ? ($auth['lti'] ?? null) : null;
-        $issuer = is_array($lti) ? ($lti['issuer'] ?? null) : null;
-        $deploymentId = is_array($lti) ? ($lti['deployment_id'] ?? null) : null;
-        $resourceLinkId = is_array($lti) ? ($lti['resource_link_id'] ?? null) : null;
+        $this->mapResourceLink($appId, $request);
 
-        if (is_string($issuer) && $issuer !== '' &&
-            is_string($deploymentId) && $deploymentId !== '' &&
-            is_string($resourceLinkId) && $resourceLinkId !== '') {
-            $now = now();
-            DB::table('resource_links')->updateOrInsert(
-                [
-                    'issuer' => $issuer,
-                    'deployment_id' => $deploymentId,
-                    'resource_link_id' => $resourceLinkId,
-                ],
-                [
-                    'app_id' => $appId,
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ]
-            );
-        }
-
-        // Minimal normalisation
         $response = [
+            'kind' => self::KIND_OPEN_INTERACTION,
             'id' => $appId,
             'title' => $package['title'] ?? 'Generated app',
             'html' => $package['html'] ?? "<div id='app'></div>",
@@ -412,8 +1105,7 @@ MSG;
             'js' => $package['js'] ?? '',
         ];
 
-        // Let frontend know if we auto-retried
-        if ($didAutoRetry) {
+        if (!empty($openResult['did_auto_retry'])) {
             $response['auto_retry'] = true;
         }
 
