@@ -19,6 +19,17 @@ function normalize(text) {
   return String(text ?? '').trim().toLowerCase()
 }
 
+function shuffledCopy(items) {
+  const xs = [...items]
+  for (let i = xs.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = xs[i]
+    xs[i] = xs[j]
+    xs[j] = tmp
+  }
+  return xs
+}
+
 function validateStructuredPayload(pkg) {
   if (!pkg || pkg.kind !== 'structured_question_set') return 'Unsupported structured payload.'
   if (!Array.isArray(pkg.questions) || pkg.questions.length !== 1) return 'Structured payload must contain exactly one question.'
@@ -84,6 +95,11 @@ export default function StructuredQuestionRunner({ pkg }) {
   }
 
   const q = pkg.questions[0]
+  const displayedOptions = useMemo(() => {
+    if (!Array.isArray(q.options)) return []
+    if (!q.shuffle_options) return q.options
+    return shuffledCopy(q.options)
+  }, [q.id, q.question_type, q.shuffle_options, q.options])
 
   const orderIds = useMemo(() => {
     if (q.question_type !== 'ordering') return []
@@ -178,6 +194,32 @@ export default function StructuredQuestionRunner({ pkg }) {
     setSubmitted(true)
   }
 
+  function getNumericExpectedText() {
+    if (q.question_type !== 'numeric') return ''
+    if (q.answer_mode === 'exact') {
+      return `Correct answer: ${q.correct_value}.`
+    }
+    if (typeof q.target_value === 'number' && typeof q.tolerance === 'number') {
+      return `Accepted answer: ${q.target_value} +/- ${q.tolerance}.`
+    }
+    if (typeof q.min_value === 'number' && typeof q.max_value === 'number') {
+      return `Accepted range: ${q.min_value} to ${q.max_value}.`
+    }
+    return ''
+  }
+
+  function getFeedbackMessage(correct) {
+    if (q.question_type === 'numeric') {
+      const expected = getNumericExpectedText()
+      if (correct) {
+        return expected ? `Correct. ${expected}` : 'Correct.'
+      }
+      return expected ? `Incorrect. ${expected}` : 'Incorrect.'
+    }
+    if (correct) return 'Correct.'
+    return 'Incorrect.'
+  }
+
   const isCorrect = submitted ? getResult() : false
 
   return (
@@ -193,7 +235,7 @@ export default function StructuredQuestionRunner({ pkg }) {
 
           {q.question_type === 'multiple_choice_single_answer' && (
             <Flex as="div" direction="column" gap="small">
-              {q.options.map((option) => {
+              {displayedOptions.map((option) => {
                 const inputId = `${q.id}-${option.id}`
                 return (
                   <label key={option.id} htmlFor={inputId} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', cursor: 'pointer' }}>
@@ -218,7 +260,7 @@ export default function StructuredQuestionRunner({ pkg }) {
 
           {q.question_type === 'multiple_choice_multiple_answer' && (
             <Flex as="div" direction="column" gap="small">
-              {q.options.map((option) => {
+              {displayedOptions.map((option) => {
                 const inputId = `${q.id}-${option.id}`
                 return (
                   <label key={option.id} htmlFor={inputId} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', cursor: 'pointer' }}>
@@ -308,6 +350,7 @@ export default function StructuredQuestionRunner({ pkg }) {
                   setSubmitted(false)
                 }}
                 aria-label="Numeric answer"
+                style={{ textAlign: 'right' }}
               />
             </label>
           )}
@@ -326,7 +369,7 @@ export default function StructuredQuestionRunner({ pkg }) {
 
         {submitted && (
           <Alert variant={isCorrect ? 'success' : 'warning'}>
-            {isCorrect ? 'Correct answer selected.' : 'That is not the correct answer.'}
+            {getFeedbackMessage(isCorrect)}
           </Alert>
         )}
       </Flex>

@@ -160,111 +160,6 @@ class GenerateAppController extends Controller
         return $violations;
     }
 
-    private function classifyPrompt(string $prompt): array
-    {
-        $types = implode(' | ', array_map(fn($t) => '"' . $t . '"', self::STRUCTURED_TYPES));
-        $system = <<<SYS
-You classify user prompts for a learning tool.
-
-Return ONLY valid JSON with this shape:
-{
-  "mode": "structured_question_set" | "open_interaction",
-  "question_type": {$types} | "unsupported",
-  "confidence": number
-}
-
-Rules:
-- Route essay/open-ended writing prompts to open_interaction with unsupported.
-- Route only the supported auto-marked question types to structured_question_set.
-- confidence must be 0..1.
-SYS;
-
-        $result = $this->callLLM([
-            ['role' => 'system', 'content' => $system],
-            ['role' => 'user', 'content' => "Prompt:\n{$prompt}"],
-        ]);
-
-        if ($result['error'] || !is_array($result['package'])) {
-            return ['mode' => self::KIND_OPEN_INTERACTION, 'question_type' => 'unsupported', 'confidence' => 0.0];
-        }
-
-        $payload = $result['package'];
-        $mode = $payload['mode'] ?? self::KIND_OPEN_INTERACTION;
-        $questionType = $payload['question_type'] ?? 'unsupported';
-        $confidence = $payload['confidence'] ?? 0;
-
-        if (!in_array($mode, [self::KIND_STRUCTURED_QUESTION_SET, self::KIND_OPEN_INTERACTION], true)) {
-            $mode = self::KIND_OPEN_INTERACTION;
-        }
-        if (!in_array($questionType, array_merge(self::STRUCTURED_TYPES, ['unsupported']), true)) {
-            $questionType = 'unsupported';
-        }
-        if (!is_numeric($confidence)) {
-            $confidence = 0;
-        }
-
-        return [
-            'mode' => $mode,
-            'question_type' => $questionType,
-            'confidence' => max(0.0, min(1.0, (float) $confidence)),
-        ];
-    }
-
-    private function detectQuestionTypeByHeuristic(string $prompt): string
-    {
-        $p = mb_strtolower($prompt);
-
-        if (preg_match('/\b(essay|long\s*answer|short\s*answer|free\s*text|open\s*ended)\b/u', $p)) {
-            return 'unsupported';
-        }
-        if (preg_match('/\b(multiple\s*answer|select\s*all|more\s*than\s*one)\b/u', $p)) {
-            return self::QUESTION_TYPE_MC_MULTIPLE;
-        }
-        if (preg_match('/\b(multiple\s*choice|single\s*best\s*answer|single\s*choice|mcq)\b/u', $p)) {
-            return self::QUESTION_TYPE_MC_SINGLE;
-        }
-        if (preg_match('/\b(match(?:ing)?|pair(?:ing)?)\b/u', $p)) {
-            return self::QUESTION_TYPE_MATCHING;
-        }
-        if (preg_match('/\b(fill\s*in\s*the\s*blank|fill\s*in\s*the\s*blanks|cloze|blank)\b/u', $p)) {
-            return self::QUESTION_TYPE_FILL_IN_BLANK;
-        }
-        if (preg_match('/\b(order(?:ing)?|sequence|arrange)\b/u', $p)) {
-            return self::QUESTION_TYPE_ORDERING;
-        }
-        if (preg_match('/\b(numeric|number|calculate|calculation|tolerance|range)\b/u', $p)) {
-            return self::QUESTION_TYPE_NUMERIC;
-        }
-
-        return 'unsupported';
-    }
-
-    private function classifyPromptForRouting(string $prompt): array
-    {
-        $heuristicType = $this->detectQuestionTypeByHeuristic($prompt);
-        if ($heuristicType !== 'unsupported') {
-            return [
-                'mode' => self::KIND_STRUCTURED_QUESTION_SET,
-                'question_type' => $heuristicType,
-                'confidence' => 0.98,
-                'source' => 'heuristic',
-            ];
-        }
-
-        $classification = $this->classifyPrompt($prompt);
-        $classification['source'] = 'llm';
-        return $classification;
-    }
-
-    private function detectExplicitStructuredTypeSwitch(string $prompt): ?string
-    {
-        $type = $this->detectQuestionTypeByHeuristic($prompt);
-        if ($type === 'unsupported') {
-            return null;
-        }
-        return $type;
-    }
-
     private function buildStructuredSystemPrompt(string $questionType, ?array $existingStructured = null): string
     {
         $existingPart = '';
@@ -955,9 +850,15 @@ MSG;
             'prompt' => 'required|string|max:10000',
             'app_id' => 'nullable|integer|exists:apps,id',
             'preview' => 'nullable|boolean',
+            'generation_mode' => 'required|string|in:' . self::KIND_STRUCTURED_QUESTION_SET . ',' . self::KIND_OPEN_INTERACTION,
+            'question_type' => 'nullable|string',
+            'convert_mode' => 'nullable|boolean',
         ]);
 
         $preview = (bool) $request->input('preview', false);
+        $generationMode = (string) $request->input('generation_mode');
+        $questionType = $request->input('question_type');
+        $convertMode = (bool) $request->input('convert_mode', false);
         $existingApp = null;
 
         if ($request->has('app_id')) {
@@ -975,91 +876,98 @@ MSG;
             }
         }
 
-        if ($existingStructured) {
-            $existingType = $existingStructured['questions'][0]['question_type'] ?? self::QUESTION_TYPE_MC_SINGLE;
-            $switchType = $this->detectExplicitStructuredTypeSwitch($request->prompt);
-            $questionType = $switchType ?: $existingType;
-
-            if (!in_array($questionType, self::STRUCTURED_TYPES, true)) {
-                $questionType = $existingType;
+        if ($generationMode === self::KIND_STRUCTURED_QUESTION_SET) {
+            if (!is_string($questionType) || !in_array($questionType, self::STRUCTURED_TYPES, true)) {
+                return response()->json([
+                    'error' => 'question_type is required and must be one of: ' . implode(', ', self::STRUCTURED_TYPES),
+                ], 422);
             }
-
-            $classification = [
-                'mode' => self::KIND_STRUCTURED_QUESTION_SET,
-                'question_type' => $questionType,
-                'confidence' => 1.0,
-                'source' => 'existing_kind',
-            ];
         } else {
-            $classification = $this->classifyPromptForRouting($request->prompt);
+            if ($questionType !== null && $questionType !== '') {
+                return response()->json([
+                    'error' => 'question_type must be omitted when generation_mode is open_interaction',
+                ], 422);
+            }
         }
 
-        Log::info('Generation route classification', [
-            'mode' => $classification['mode'] ?? null,
-            'question_type' => $classification['question_type'] ?? null,
-            'confidence' => $classification['confidence'] ?? null,
-            'source' => $classification['source'] ?? null,
+        $existingMode = $existingApp ? (string) ($existingApp->kind ?? self::KIND_OPEN_INTERACTION) : null;
+        $existingType = $existingStructured['questions'][0]['question_type'] ?? null;
+
+        if ($existingApp) {
+            $modeChanged = ($existingMode !== $generationMode);
+            $typeChanged = ($generationMode === self::KIND_STRUCTURED_QUESTION_SET && is_string($existingType) && $existingType !== $questionType);
+            if (($modeChanged || $typeChanged) && !$convertMode) {
+                return response()->json([
+                    'error' => 'Mode/type is locked for revisions. Enable convert_mode to change mode or question type.',
+                ], 422);
+            }
+        }
+
+        Log::info('Generation mode requested', [
+            'requested_mode' => $generationMode,
+            'requested_question_type' => $questionType,
+            'existing_mode' => $existingMode,
+            'existing_question_type' => $existingType,
+            'convert_mode' => $convertMode,
             'has_existing_app' => (bool) $existingApp,
             'preview' => $preview,
         ]);
 
-        if (($classification['mode'] ?? null) === self::KIND_STRUCTURED_QUESTION_SET
-            && in_array(($classification['question_type'] ?? null), self::STRUCTURED_TYPES, true)) {
-            $questionType = $classification['question_type'];
+        if ($generationMode === self::KIND_STRUCTURED_QUESTION_SET) {
             $structured = $this->generateStructuredQuestionSet(
                 $request->prompt,
-                (float) ($classification['confidence'] ?? 0),
+                1.0,
                 $questionType,
                 $existingStructured
             );
 
-            if ($structured !== null) {
-                $appId = $existingApp ? (int) $existingApp->id : null;
-
-                if (!$preview) {
-                    if ($existingApp) {
-                        DB::table('apps')->where('id', $existingApp->id)->update([
-                            'title' => $structured['title'],
-                            'kind' => self::KIND_STRUCTURED_QUESTION_SET,
-                            'html' => null,
-                            'css' => null,
-                            'js' => null,
-                            'structured_json' => json_encode($structured),
-                            'updated_at' => now(),
-                        ]);
-                        $appId = (int) $existingApp->id;
-                    } else {
-                        $appId = DB::table('apps')->insertGetId([
-                            'title' => $structured['title'],
-                            'kind' => self::KIND_STRUCTURED_QUESTION_SET,
-                            'html' => null,
-                            'css' => null,
-                            'js' => null,
-                            'structured_json' => json_encode($structured),
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ]);
-                    }
-                }
-
-                $this->mapResourceLink($appId, $request);
-
+            if ($structured === null) {
                 return response()->json([
-                    'kind' => self::KIND_STRUCTURED_QUESTION_SET,
-                    'schema_version' => $structured['schema_version'],
-                    'id' => $appId,
-                    'title' => $structured['title'],
-                    'questions' => $structured['questions'],
-                    'meta' => $structured['meta'],
-                ]);
+                    'error' => 'Unable to generate a valid structured question set for the requested question_type.',
+                ], 422);
             }
 
-            Log::warning('Structured question generation failed validation; falling back to open interaction', [
-                'prompt' => $request->prompt,
-                'classification' => $classification,
+            $appId = $existingApp ? (int) $existingApp->id : null;
+
+            if (!$preview) {
+                if ($existingApp) {
+                    DB::table('apps')->where('id', $existingApp->id)->update([
+                        'title' => $structured['title'],
+                        'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+                        'html' => null,
+                        'css' => null,
+                        'js' => null,
+                        'structured_json' => json_encode($structured),
+                        'updated_at' => now(),
+                    ]);
+                    $appId = (int) $existingApp->id;
+                } else {
+                    $appId = DB::table('apps')->insertGetId([
+                        'title' => $structured['title'],
+                        'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+                        'html' => null,
+                        'css' => null,
+                        'js' => null,
+                        'structured_json' => json_encode($structured),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
+
+            $this->mapResourceLink($appId, $request);
+
+            return response()->json([
+                'kind' => self::KIND_STRUCTURED_QUESTION_SET,
+                'schema_version' => $structured['schema_version'],
+                'id' => $appId,
+                'title' => $structured['title'],
+                'questions' => $structured['questions'],
+                'meta' => $structured['meta'],
             ]);
         }
 
+        // open_interaction path
         $openResult = $this->generateOpenInteractionPackage($request, $existingApp);
         if (($openResult['status'] ?? 500) !== 200) {
             return response()->json($openResult, $openResult['status'] ?? 500);

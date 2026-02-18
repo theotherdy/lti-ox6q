@@ -16,12 +16,9 @@ import { IconHamburgerLine } from '@instructure/ui-icons'
 import { ScreenReaderContent } from '@instructure/ui-a11y-content'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-
-function jsonHeaders(token) {
-  const h = { 'Content-Type': 'application/json' }
-  if (token) h.Authorization = `Bearer ${token}`
-  return h
-}
+const MODE_STRUCTURED = 'structured_question_set'
+const MODE_OPEN = 'open_interaction'
+const DEFAULT_STRUCTURED_TYPE = 'multiple_choice_single_answer'
 
 function parseJwt(token) {
   if (!token || typeof token !== 'string') return null
@@ -71,6 +68,11 @@ export default function App() {
   const [originalApp, setOriginalApp] = useState(null)
   // Drawer layout state
   const [isTrayOpen, setIsTrayOpen] = useState(true)
+  const [generationMode, setGenerationMode] = useState(MODE_STRUCTURED)
+  const [questionType, setQuestionType] = useState(DEFAULT_STRUCTURED_TYPE)
+  const [modeLocked, setModeLocked] = useState(false)
+  const [convertMode, setConvertMode] = useState(false)
+  const refreshInFlightRef = useRef(null)
 
   // Handle JWT from LtiTokenRetriever (Tool Support launch)
   const handleLtiJwt = useCallback(async (toolSupportJwt, server) => {
@@ -108,6 +110,70 @@ export default function App() {
     }
   }
 
+  async function refreshAccessToken(tokenToRefresh = accessToken, opts = {}) {
+    const { clearOnUnauthorized = true } = opts
+    if (!tokenToRefresh) return null
+
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current
+    }
+
+    refreshInFlightRef.current = (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${tokenToRefresh}` },
+        })
+
+        if (!res.ok) {
+          if (res.status === 401 && clearOnUnauthorized) {
+            setToken(null)
+            setErrorMessage('Session expired — please re-launch.')
+          }
+          return null
+        }
+
+        const data = await res.json().catch(() => ({}))
+        if (!data?.access_token) return null
+        setToken(data.access_token)
+        setErrorMessage(null)
+        return data.access_token
+      } catch (e) {
+        console.error('Token refresh error:', e)
+        return null
+      }
+    })()
+
+    const refreshedToken = await refreshInFlightRef.current
+    refreshInFlightRef.current = null
+    return refreshedToken
+  }
+
+  async function fetchJsonWithAutoRefresh(url, init = {}) {
+    const token = accessToken
+    const originalHeaders = init.headers || {}
+    const headers = token && !originalHeaders.Authorization
+      ? { ...originalHeaders, Authorization: `Bearer ${token}` }
+      : originalHeaders
+
+    let res = await fetch(url, { ...init, headers })
+    if (res.status !== 401) {
+      const body = await res.json().catch(() => ({}))
+      return { res, body }
+    }
+
+    const refreshedToken = await refreshAccessToken(token)
+    if (!refreshedToken) {
+      const body = await res.json().catch(() => ({}))
+      return { res, body }
+    }
+
+    const retryHeaders = { ...originalHeaders, Authorization: `Bearer ${refreshedToken}` }
+    res = await fetch(url, { ...init, headers: retryHeaders })
+    const body = await res.json().catch(() => ({}))
+    return { res, body }
+  }
+
   // Auto-refresh token before expiry (at 95% of lifetime)
   useEffect(() => {
     if (!accessToken || !bootstrapInfo?.expires_in) return
@@ -119,27 +185,11 @@ export default function App() {
     console.log(`Token auto-refresh scheduled in ${Math.round(refreshInterval / 1000)}s (95% of ${bootstrapInfo.expires_in}s lifetime)`)
 
     const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/auth/refresh`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}` },
-        })
-
-        if (res.ok) {
-          const data = await res.json()
-          setToken(data.access_token)
-          console.log('Token refreshed successfully')
-          setErrorMessage(null)
-          return
-        } else {
-          console.warn('Token refresh failed, user may need to re-launch')
-          if (res.status === 401) {
-            setToken(null)
-            setErrorMessage('Session expired — please re-launch.')
-          }
-        }
-      } catch (e) {
-        console.error('Token refresh error:', e)
+      const refreshed = await refreshAccessToken(accessToken)
+      if (refreshed) {
+        console.log('Token refreshed successfully')
+      } else {
+        console.warn('Token refresh failed, user may need to re-launch')
       }
     }, refreshInterval)
 
@@ -149,16 +199,12 @@ export default function App() {
   async function loadAppById(appId) {
     if (!accessToken) return
     try {
-      const res = await fetch(`${API_BASE}/api/apps/${appId}/package`, {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appId}/package`, {
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
         },
       })
-      const body = await res.json().catch(() => ({}))
       if (res.status === 401) {
-        setToken(null)
-        setErrorMessage('Session expired — please re-launch.')
         return
       }
       if (!res.ok) {
@@ -187,26 +233,30 @@ export default function App() {
     }, 1000)
 
     try {
-      const requestBody = { prompt }
+      const requestBody = {
+        prompt,
+        generation_mode: generationMode,
+      }
+
+      if (generationMode === MODE_STRUCTURED) {
+        requestBody.question_type = questionType
+      }
+
       if (isRevising) {
         requestBody.app_id = appPackage.id
         requestBody.preview = true  // Don't save to DB yet
+        requestBody.convert_mode = convertMode
         setOriginalApp(appPackage)   // Save original for revert
       }
 
-      const res = await fetch(`${API_BASE}/api/apps/generate`, {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify(requestBody),
       })
-
-      const body = await res.json().catch(() => ({}))
       if (res.status === 401) {
-        setToken(null)
-        setErrorMessage('Session expired — please re-launch.')
         return
       }
       if (!res.ok) {
@@ -241,11 +291,10 @@ export default function App() {
     if (!pendingRevision || !accessToken) return
 
     try {
-      const res = await fetch(`${API_BASE}/api/apps/${pendingRevision.id}/save-revision`, {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${pendingRevision.id}/save-revision`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify(
           pendingRevision.kind === 'structured_question_set'
@@ -266,10 +315,7 @@ export default function App() {
         ),
       })
 
-      const body = await res.json().catch(() => ({}))
       if (res.status === 401) {
-        setToken(null)
-        setErrorMessage('Session expired — please re-launch.')
         return
       }
       if (!res.ok) {
@@ -312,6 +358,27 @@ export default function App() {
     if (!lastAppId) return
     loadAppById(lastAppId)
   }, [accessToken, appPackage, bootstrapInfo])
+
+  useEffect(() => {
+    if (!appPackage) {
+      setGenerationMode(MODE_STRUCTURED)
+      setQuestionType(DEFAULT_STRUCTURED_TYPE)
+      setModeLocked(false)
+      setConvertMode(false)
+      return
+    }
+
+    const mode = appPackage.kind === MODE_STRUCTURED ? MODE_STRUCTURED : MODE_OPEN
+    setGenerationMode(mode)
+    if (mode === MODE_STRUCTURED) {
+      const type = appPackage?.questions?.[0]?.question_type || DEFAULT_STRUCTURED_TYPE
+      setQuestionType(type)
+    } else {
+      setQuestionType(DEFAULT_STRUCTURED_TYPE)
+    }
+    setModeLocked(true)
+    setConvertMode(false)
+  }, [appPackage])
 
   useEffect(() => {
     if (bootstrapInfo) {
@@ -357,14 +424,11 @@ export default function App() {
       const lti = bootstrapInfo?.lti || tokenLti
       const hasMapping = Boolean(lti?.issuer && lti?.deployment_id && lti?.resource_link_id)
       if (hasMapping) {
-        const res = await fetch(`${API_BASE}/api/apps/mapping`, {
+        const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/mapping`, {
           method: 'DELETE',
-          headers: jsonHeaders(accessToken),
+          headers: { 'Content-Type': 'application/json' },
         })
-        const body = await res.json().catch(() => ({}))
         if (res.status === 401) {
-          setToken(null)
-          setErrorMessage('Session expired — please re-launch.')
           return
         }
         if (!res.ok) {
@@ -454,6 +518,80 @@ export default function App() {
 
           {/* LLM authoring UI */}
           <View as="div" margin="small 0">
+            <View as="div" margin="0 0 small 0">
+              <Text size="small" weight="bold">Generation mode</Text>
+              <Flex gap="small" margin="x-small 0 0 0">
+                <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
+                  <input
+                    type="radio"
+                    name="generation_mode"
+                    value={MODE_STRUCTURED}
+                    checked={generationMode === MODE_STRUCTURED}
+                    disabled={modeLocked && !convertMode}
+                    onChange={() => setGenerationMode(MODE_STRUCTURED)}
+                  />
+                  <span>Standard question type</span>
+                </label>
+                <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
+                  <input
+                    type="radio"
+                    name="generation_mode"
+                    value={MODE_OPEN}
+                    checked={generationMode === MODE_OPEN}
+                    disabled={modeLocked && !convertMode}
+                    onChange={() => setGenerationMode(MODE_OPEN)}
+                  />
+                  <span>Open interaction</span>
+                </label>
+              </Flex>
+            </View>
+
+            {generationMode === MODE_STRUCTURED && (
+              <View as="div" margin="0 0 small 0">
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                  <Text size="small" weight="bold">Question type</Text>
+                  <select
+                    value={questionType}
+                    disabled={modeLocked && !convertMode}
+                    onChange={(e) => setQuestionType(e.target.value)}
+                  >
+                    <option value="multiple_choice_single_answer">Multiple choice (single answer)</option>
+                    <option value="multiple_choice_multiple_answer">Multiple choice (multiple answer)</option>
+                    <option value="matching">Matching</option>
+                    <option value="fill_in_blank">Fill in the blank</option>
+                    <option value="ordering">Ordering</option>
+                    <option value="numeric">Numeric</option>
+                  </select>
+                </label>
+              </View>
+            )}
+
+            {appPackage && modeLocked && (
+              <View as="div" margin="0 0 small 0">
+                <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={convertMode}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      setConvertMode(checked)
+                      if (!checked) {
+                        const mode = appPackage?.kind === MODE_STRUCTURED ? MODE_STRUCTURED : MODE_OPEN
+                        setGenerationMode(mode)
+                        if (mode === MODE_STRUCTURED) {
+                          setQuestionType(appPackage?.questions?.[0]?.question_type || DEFAULT_STRUCTURED_TYPE)
+                        } else {
+                          setQuestionType(DEFAULT_STRUCTURED_TYPE)
+                        }
+                      }
+                    }}
+                    disabled={generating || pendingRevision}
+                  />
+                  <span>Convert type/mode for this revision</span>
+                </label>
+              </View>
+            )}
+
             <TextArea
               label={<ScreenReaderContent>App description</ScreenReaderContent>}
               placeholder={
@@ -469,7 +607,7 @@ export default function App() {
             <Flex gap="small" margin="small 0">
               <Button
                 onClick={generateApp}
-                disabled={generating || !prompt.trim() || !accessToken || pendingRevision}
+                disabled={generating || !prompt.trim() || !accessToken || pendingRevision || (generationMode === MODE_STRUCTURED && !questionType)}
                 color="primary"
               >
                 {generating
