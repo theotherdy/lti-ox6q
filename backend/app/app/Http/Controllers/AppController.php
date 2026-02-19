@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use App\Services\StructuredHtmlSanitizer;
 
 class AppController extends Controller
 {
@@ -36,6 +37,7 @@ class AppController extends Controller
             if (!is_array($structured)) {
                 return response()->json(['error' => 'Stored structured question payload is invalid.'], 500);
             }
+            $structured = $this->sanitizeStructuredPayload($structured);
 
             return response()->json([
                 'kind' => 'structured_question_set',
@@ -80,6 +82,43 @@ class AppController extends Controller
         return response()->json(['state' => $state]);
     }
 
+    public function getStateSummary(Request $request, $appId)
+    {
+        if (!ctype_digit((string) $appId)) {
+            return response()->json(['error' => 'Invalid appId (must be numeric).'], 400);
+        }
+        $appId = (int) $appId;
+
+        $appExists = DB::table('apps')->where('id', $appId)->exists();
+        if (!$appExists) {
+            return response()->json(['error' => 'App not found.'], 404);
+        }
+
+        $totalStateCount = DB::table('app_states')
+            ->where('app_id', $appId)
+            ->count();
+
+        $instructorStateCount = DB::table('app_states')
+            ->where('app_id', $appId)
+            ->where('is_instructor', true)
+            ->count();
+
+        $nonInstructorStateCount = DB::table('app_states')
+            ->where('app_id', $appId)
+            ->where(function ($q) {
+                $q->where('is_instructor', false)
+                    ->orWhereNull('is_instructor');
+            })
+            ->count();
+
+        return response()->json([
+            'total_state_count' => $totalStateCount,
+            'instructor_state_count' => $instructorStateCount,
+            'non_instructor_state_count' => $nonInstructorStateCount,
+            'has_non_instructor_state' => $nonInstructorStateCount > 0,
+        ]);
+    }
+
     public function setState(Request $request, $appId)
     {
         if (!ctype_digit((string) $appId)) {
@@ -89,6 +128,10 @@ class AppController extends Controller
 
         $sub = $request->attributes->get('auth_sub');
         $ltiUserId = $this->getLtiUserId($sub);
+        $auth = $request->attributes->get('auth');
+        $roles = is_array($auth) ? ($auth['roles'] ?? null) : null;
+        $rolesJson = is_array($roles) ? json_encode($roles) : null;
+        $isInstructor = (bool) $request->attributes->get('auth_lti_is_instructor', false);
 
         $request->validate([
             'state' => ['required'],
@@ -107,6 +150,8 @@ class AppController extends Controller
                 ->where('lti_user_id', $ltiUserId)
                 ->update([
                     'state_json' => $stateJson,
+                    'is_instructor' => $isInstructor,
+                    'roles_json' => $rolesJson,
                     'updated_at' => now(),
                 ]);
         } else {
@@ -114,6 +159,8 @@ class AppController extends Controller
                 'app_id' => $appId,
                 'lti_user_id' => $ltiUserId,
                 'state_json' => $stateJson,
+                'is_instructor' => $isInstructor,
+                'roles_json' => $rolesJson,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -163,6 +210,10 @@ class AppController extends Controller
         if (!is_string($kind) || !in_array($kind, ['open_interaction', 'structured_question_set'], true)) {
             return response()->json(['error' => 'Invalid revision kind'], 422);
         }
+        $request->validate([
+            'reset_non_instructor_state' => 'nullable|boolean',
+        ]);
+        $resetNonInstructorState = (bool) $request->input('reset_non_instructor_state', false);
 
         // Verify app exists
         $app = DB::table('apps')->where('id', $appId)->first();
@@ -178,7 +229,7 @@ class AppController extends Controller
                 'meta' => 'nullable|array',
             ]);
 
-            $questions = $request->input('questions');
+            $questions = $this->sanitizeStructuredQuestions($request->input('questions'));
             $q = $questions[0] ?? null;
             if (!is_array($q) || !in_array(($q['question_type'] ?? null), self::STRUCTURED_TYPES, true)) {
                 return response()->json(['error' => 'Unsupported structured question type'], 422);
@@ -196,15 +247,21 @@ class AppController extends Controller
                 'meta' => $request->input('meta', []),
             ];
 
-            DB::table('apps')->where('id', $appId)->update([
-                'title' => $request->input('title'),
-                'kind' => 'structured_question_set',
-                'html' => null,
-                'css' => null,
-                'js' => null,
-                'structured_json' => json_encode($payload),
-                'updated_at' => now(),
-            ]);
+            DB::transaction(function () use ($appId, $request, $payload, $resetNonInstructorState) {
+                DB::table('apps')->where('id', $appId)->update([
+                    'title' => $request->input('title'),
+                    'kind' => 'structured_question_set',
+                    'html' => null,
+                    'css' => null,
+                    'js' => null,
+                    'structured_json' => json_encode($payload),
+                    'updated_at' => now(),
+                ]);
+
+                if ($resetNonInstructorState) {
+                    $this->clearNonInstructorState((int) $appId);
+                }
+            });
         } else {
             $request->validate([
                 'title' => 'required|string',
@@ -227,15 +284,21 @@ class AppController extends Controller
                 ], 422);
             }
 
-            DB::table('apps')->where('id', $appId)->update([
-                'title' => $request->title,
-                'kind' => 'open_interaction',
-                'html' => $request->html,
-                'css' => $request->css,
-                'js' => $request->js,
-                'structured_json' => null,
-                'updated_at' => now(),
-            ]);
+            DB::transaction(function () use ($appId, $request, $resetNonInstructorState) {
+                DB::table('apps')->where('id', $appId)->update([
+                    'title' => $request->title,
+                    'kind' => 'open_interaction',
+                    'html' => $request->html,
+                    'css' => $request->css,
+                    'js' => $request->js,
+                    'structured_json' => null,
+                    'updated_at' => now(),
+                ]);
+
+                if ($resetNonInstructorState) {
+                    $this->clearNonInstructorState((int) $appId);
+                }
+            });
         }
 
         return response()->json(['success' => true]);
@@ -253,6 +316,10 @@ class AppController extends Controller
         }
         if (!is_numeric($q['points_possible'] ?? null)) {
             return 'Structured question must include numeric points_possible';
+        }
+        if (array_key_exists('reveal_correct_after_two_incorrect_attempts', $q)
+            && !is_bool($q['reveal_correct_after_two_incorrect_attempts'])) {
+            return 'reveal_correct_after_two_incorrect_attempts must be a boolean when provided';
         }
 
         $validateOptions = function ($options): ?array {
@@ -476,5 +543,48 @@ class AppController extends Controller
         $userId = DB::table('lti_users')->where('sub', $sub)->value('id');
 
         return (int) $userId;
+    }
+
+    private function clearNonInstructorState(int $appId): void
+    {
+        DB::table('app_states')
+            ->where('app_id', $appId)
+            ->where(function ($q) {
+                $q->where('is_instructor', false)
+                    ->orWhereNull('is_instructor');
+            })
+            ->delete();
+    }
+
+    private function sanitizeStructuredPayload(array $structured): array
+    {
+        if (!isset($structured['questions']) || !is_array($structured['questions'])) {
+            return $structured;
+        }
+
+        $structured['questions'] = $this->sanitizeStructuredQuestions($structured['questions']);
+        return $structured;
+    }
+
+    private function sanitizeStructuredQuestions($questions): array
+    {
+        if (!is_array($questions)) {
+            return [];
+        }
+
+        $sanitizer = app(StructuredHtmlSanitizer::class);
+        $sanitized = [];
+        foreach ($questions as $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+            $next = $question;
+            if (isset($next['prompt_html']) && is_string($next['prompt_html'])) {
+                $next['prompt_html'] = $sanitizer->sanitize($next['prompt_html']);
+            }
+            $sanitized[] = $next;
+        }
+
+        return $sanitized;
     }
 }

@@ -74,6 +74,7 @@ class AuthRefreshController extends Controller
             'exp' => $now + $expiresIn,
             'roles' => $payload['roles'] ?? null,
             'context' => $payload['context'] ?? null,
+            'launch_mode' => $payload['launch_mode'] ?? null,
             'lti' => $payload['lti'] ?? null,
         ];
 

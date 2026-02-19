@@ -21,14 +21,6 @@ class LocalJwtAuth
         try {
             $payloadObj = JWT::decode($token, new Key((string) env('LOCAL_JWT_SECRET'), 'HS256'));
             $payload = json_decode(json_encode($payloadObj), true);
-
-            \Log::debug('LocalJwtAuth: Token validated', [
-                'iat' => $payload['iat'] ?? null,
-                'exp' => $payload['exp'] ?? null,
-                'now' => time(),
-                'age_seconds' => time() - ($payload['iat'] ?? time()),
-                'ttl_seconds' => ($payload['exp'] ?? time()) - time(),
-            ]);
         } catch (\Throwable $e) {
             // Try to decode without verification to see timing info
             $parts = explode('.', $token);
@@ -69,11 +61,21 @@ class LocalJwtAuth
         $issuer = $lti['issuer'] ?? null;
         $deploymentId = $lti['deployment_id'] ?? null;
         $resourceLinkId = $lti['resource_link_id'] ?? null;
+        $messageType = $lti['message_type'] ?? null;
+        $launchMode = $payload['launch_mode'] ?? ($lti['launch_mode'] ?? 'resource');
+        if (!is_string($launchMode) || $launchMode === '') {
+            $launchMode = 'resource';
+        }
+        $isInstructor = (bool) ($lti['is_instructor'] ?? false);
 
         if (!is_string($issuer) || $issuer === '' ||
-            !is_string($deploymentId) || $deploymentId === '' ||
-            !is_string($resourceLinkId) || $resourceLinkId === '') {
-            return response()->json(['error' => 'Token missing required LTI context claims.'], 401);
+            !is_string($deploymentId) || $deploymentId === '') {
+            return response()->json(['error' => 'Token missing required LTI issuer/deployment claims.'], 401);
+        }
+
+        $isDeepLinkLaunch = ($launchMode === 'deep_linking') || ($messageType === 'LtiDeepLinkingRequest');
+        if (!$isDeepLinkLaunch && (!is_string($resourceLinkId) || $resourceLinkId === '')) {
+            return response()->json(['error' => 'Token missing required LTI resource_link_id claim.'], 401);
         }
 
         // Attach auth context to the request
@@ -82,6 +84,9 @@ class LocalJwtAuth
         $request->attributes->set('auth_lti_issuer', $issuer);
         $request->attributes->set('auth_lti_deployment_id', $deploymentId);
         $request->attributes->set('auth_lti_resource_link_id', $resourceLinkId);
+        $request->attributes->set('auth_lti_message_type', $messageType);
+        $request->attributes->set('auth_launch_mode', $launchMode);
+        $request->attributes->set('auth_lti_is_instructor', $isInstructor);
 
         return $next($request);
     }

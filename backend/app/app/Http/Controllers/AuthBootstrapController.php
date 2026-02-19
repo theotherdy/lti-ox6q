@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Firebase\JWT\JWT;
 use App\Services\ToolSupportJwtVerifier;
+use App\Services\LtiRoleResolver;
 
 class AuthBootstrapController extends Controller
 {
@@ -62,15 +63,26 @@ class AuthBootstrapController extends Controller
             return response()->json(['error' => 'Missing sub claim in Tool Support JWT.'], 400);
         }
 
-        // Pull a few useful bits if present (optional)
+        // Pull useful context from launch claims.
         $roles = $claims['https://purl.imsglobal.org/spec/lti/claim/roles'] ?? null;
         $context = $claims['https://purl.imsglobal.org/spec/lti/claim/context'] ?? null;
+        $custom = $claims['https://purl.imsglobal.org/spec/lti/claim/custom'] ?? null;
+        $deepLinkingSettings = $claims['https://purl.imsglobal.org/spec/lti-dl/claim/deep_linking_settings'] ?? null;
+        $launchPresentation = $claims['https://purl.imsglobal.org/spec/lti/claim/launch_presentation'] ?? null;
+        $targetLinkUri = $claims['https://purl.imsglobal.org/spec/lti/claim/target_link_uri'] ?? null;
 
         $issuer = $claims['iss'] ?? null;
         $deploymentId = $claims['https://purl.imsglobal.org/spec/lti/claim/deployment_id'] ?? null;
         $resourceLink = $claims['https://purl.imsglobal.org/spec/lti/claim/resource_link'] ?? null;
         $resourceLinkId = is_array($resourceLink) ? ($resourceLink['id'] ?? null) : null;
         $contextId = is_array($context) ? ($context['id'] ?? null) : null;
+        $launchMode = $messageType === 'LtiDeepLinkingRequest' ? 'deep_linking' : 'resource';
+
+        $isInstructor = app(LtiRoleResolver::class)->isInstructor($roles);
+        $custom = is_array($custom) ? $custom : null;
+        $deepLinkingSettings = is_array($deepLinkingSettings) ? $deepLinkingSettings : null;
+        $launchPresentation = is_array($launchPresentation) ? $launchPresentation : null;
+        $targetLinkUri = is_string($targetLinkUri) ? $targetLinkUri : null;
 
         $now = time();
         $expiresIn = (int) env('LOCAL_JWT_EXPIRES_IN', 1800);
@@ -82,18 +94,28 @@ class AuthBootstrapController extends Controller
             'exp' => $now + $expiresIn,
             'roles' => $roles,
             'context' => $context,
+            'launch_mode' => $launchMode,
             'lti' => [
                 'issuer' => $issuer,
                 'deployment_id' => $deploymentId,
                 'resource_link_id' => $resourceLinkId,
                 'context_id' => $contextId,
+                'message_type' => $messageType,
+                'deep_linking_settings' => $deepLinkingSettings,
+                'launch_presentation' => $launchPresentation,
+                'target_link_uri' => $targetLinkUri,
+                'custom' => $custom,
+                'is_instructor' => $isInstructor,
+                'launch_mode' => $launchMode,
             ],
         ];
 
         $localJwt = JWT::encode($localPayload, env('LOCAL_JWT_SECRET'), 'HS256');
 
-        $appId = null;
-        if (is_string($issuer) && $issuer !== '' &&
+        $appId = $this->resolveCustomAppId($custom);
+
+        if ($appId === null &&
+            is_string($issuer) && $issuer !== '' &&
             is_string($deploymentId) && $deploymentId !== '' &&
             is_string($resourceLinkId) && $resourceLinkId !== '') {
             $row = DB::table('resource_links')
@@ -112,12 +134,43 @@ class AuthBootstrapController extends Controller
             'expires_in' => $expiresIn,
             'subject' => $sub,
             'app_id' => $appId,
+            'launch_mode' => $launchMode,
             'lti' => [
                 'issuer' => $issuer,
                 'deployment_id' => $deploymentId,
                 'resource_link_id' => $resourceLinkId,
                 'context_id' => $contextId,
+                'message_type' => $messageType,
+                'deep_linking_settings' => $deepLinkingSettings,
+                'launch_presentation' => $launchPresentation,
+                'target_link_uri' => $targetLinkUri,
+                'custom' => $custom,
+                'is_instructor' => $isInstructor,
+                'launch_mode' => $launchMode,
             ],
         ]);
+    }
+
+    private function resolveCustomAppId(?array $custom): ?int
+    {
+        if (!$custom) {
+            return null;
+        }
+
+        $candidate = $custom['ox6q_app_id'] ?? $custom['app_id'] ?? null;
+        if (is_int($candidate)) {
+            $appId = $candidate;
+        } elseif (is_string($candidate) && ctype_digit($candidate)) {
+            $appId = (int) $candidate;
+        } else {
+            return null;
+        }
+
+        if ($appId <= 0) {
+            return null;
+        }
+
+        $exists = DB::table('apps')->where('id', $appId)->exists();
+        return $exists ? $appId : null;
     }
 }

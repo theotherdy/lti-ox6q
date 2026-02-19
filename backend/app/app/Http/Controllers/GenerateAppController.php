@@ -6,12 +6,13 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use App\Services\StructuredHtmlSanitizer;
 
 class GenerateAppController extends Controller
 {
     private const KIND_OPEN_INTERACTION = 'open_interaction';
     private const KIND_STRUCTURED_QUESTION_SET = 'structured_question_set';
-    private const SCHEMA_VERSION = '2026-02-06';
+    private const SCHEMA_VERSION = '2026-02-18';
 
     private const QUESTION_TYPE_MC_SINGLE = 'multiple_choice_single_answer';
     private const QUESTION_TYPE_MC_MULTIPLE = 'multiple_choice_multiple_answer';
@@ -195,7 +196,8 @@ Question schema:
   "options": [{"id": string, "text": string}],
   "points_possible": number,
   "shuffle_options": boolean,
-  "correct_option_id": string
+  "correct_option_id": string,
+  "reveal_correct_after_two_incorrect_attempts": boolean
 }
 Constraints:
 - options: 2..8 unique IDs.
@@ -210,7 +212,8 @@ Question schema:
   "options": [{"id": string, "text": string}],
   "points_possible": number,
   "shuffle_options": boolean,
-  "correct_option_ids": [string]
+  "correct_option_ids": [string],
+  "reveal_correct_after_two_incorrect_attempts": boolean
 }
 Constraints:
 - options: 2..8 unique IDs.
@@ -226,7 +229,8 @@ Question schema:
   "choices": [{"id": string, "text": string}],
   "correct_matches": [{"prompt_id": string, "choice_id": string}],
   "points_possible": number,
-  "shuffle_options": boolean
+  "shuffle_options": boolean,
+  "reveal_correct_after_two_incorrect_attempts": boolean
 }
 Constraints:
 - prompts/choices count: 2..8 each.
@@ -240,7 +244,8 @@ Question schema:
   "prompt_html": string,
   "blanks": [{"id": string, "acceptable_answers": [string]}],
   "points_possible": number,
-  "shuffle_options": false
+  "shuffle_options": false,
+  "reveal_correct_after_two_incorrect_attempts": boolean
 }
 Constraints:
 - Use placeholder tokens in prompt_html: [[blank_id]].
@@ -257,7 +262,8 @@ Question schema:
   "items": [{"id": string, "text": string}],
   "correct_order": [string],
   "points_possible": number,
-  "shuffle_options": true
+  "shuffle_options": true,
+  "reveal_correct_after_two_incorrect_attempts": boolean
 }
 Constraints:
 - items count: 2..8 with unique IDs.
@@ -276,7 +282,8 @@ Question schema:
   "min_value": number,
   "max_value": number,
   "points_possible": number,
-  "shuffle_options": false
+  "shuffle_options": false,
+  "reveal_correct_after_two_incorrect_attempts": boolean
 }
 Constraints:
 - If answer_mode=exact, provide correct_value.
@@ -332,13 +339,22 @@ TXT,
             return null;
         }
 
+        $existingQuestion = null;
+        if (is_array($existingStructured)
+            && isset($existingStructured['questions'])
+            && is_array($existingStructured['questions'])
+            && isset($existingStructured['questions'][0])
+            && is_array($existingStructured['questions'][0])) {
+            $existingQuestion = $existingStructured['questions'][0];
+        }
+
         $normalizedQuestion = match ($questionType) {
-            self::QUESTION_TYPE_MC_SINGLE => $this->normalizeQuestionMcSingle($questions[0]),
-            self::QUESTION_TYPE_MC_MULTIPLE => $this->normalizeQuestionMcMultiple($questions[0]),
-            self::QUESTION_TYPE_MATCHING => $this->normalizeQuestionMatching($questions[0]),
-            self::QUESTION_TYPE_FILL_IN_BLANK => $this->normalizeQuestionFillInBlank($questions[0]),
-            self::QUESTION_TYPE_ORDERING => $this->normalizeQuestionOrdering($questions[0]),
-            self::QUESTION_TYPE_NUMERIC => $this->normalizeQuestionNumeric($questions[0]),
+            self::QUESTION_TYPE_MC_SINGLE => $this->normalizeQuestionMcSingle($questions[0], $existingQuestion),
+            self::QUESTION_TYPE_MC_MULTIPLE => $this->normalizeQuestionMcMultiple($questions[0], $existingQuestion),
+            self::QUESTION_TYPE_MATCHING => $this->normalizeQuestionMatching($questions[0], $existingQuestion),
+            self::QUESTION_TYPE_FILL_IN_BLANK => $this->normalizeQuestionFillInBlank($questions[0], $existingQuestion),
+            self::QUESTION_TYPE_ORDERING => $this->normalizeQuestionOrdering($questions[0], $existingQuestion),
+            self::QUESTION_TYPE_NUMERIC => $this->normalizeQuestionNumeric($questions[0], $existingQuestion),
             default => null,
         };
 
@@ -358,7 +374,7 @@ TXT,
         ];
     }
 
-    private function normalizeQuestionBase(array $q, string $expectedType): ?array
+    private function normalizeQuestionBase(array $q, string $expectedType, ?array $existingQuestion = null): ?array
     {
         if (($q['question_type'] ?? null) !== $expectedType) {
             return null;
@@ -378,11 +394,26 @@ TXT,
             $pointsPossible = 1;
         }
 
+        $promptHtml = app(StructuredHtmlSanitizer::class)->sanitize($promptHtml);
+        if ($promptHtml === '') {
+            return null;
+        }
+
+        $revealAfterTwoIncorrect = true;
+        if (isset($q['reveal_correct_after_two_incorrect_attempts']) && is_bool($q['reveal_correct_after_two_incorrect_attempts'])) {
+            $revealAfterTwoIncorrect = $q['reveal_correct_after_two_incorrect_attempts'];
+        } elseif (is_array($existingQuestion)
+            && isset($existingQuestion['reveal_correct_after_two_incorrect_attempts'])
+            && is_bool($existingQuestion['reveal_correct_after_two_incorrect_attempts'])) {
+            $revealAfterTwoIncorrect = $existingQuestion['reveal_correct_after_two_incorrect_attempts'];
+        }
+
         return [
             'id' => $id,
             'question_type' => $expectedType,
             'prompt_html' => $promptHtml,
             'points_possible' => (float) $pointsPossible,
+            'reveal_correct_after_two_incorrect_attempts' => $revealAfterTwoIncorrect,
         ];
     }
 
@@ -413,9 +444,9 @@ TXT,
         return $normalized;
     }
 
-    private function normalizeQuestionMcSingle(array $q): ?array
+    private function normalizeQuestionMcSingle(array $q, ?array $existingQuestion = null): ?array
     {
-        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MC_SINGLE);
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MC_SINGLE, $existingQuestion);
         if (!$base) {
             return null;
         }
@@ -447,9 +478,9 @@ TXT,
         ]);
     }
 
-    private function normalizeQuestionMcMultiple(array $q): ?array
+    private function normalizeQuestionMcMultiple(array $q, ?array $existingQuestion = null): ?array
     {
-        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MC_MULTIPLE);
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MC_MULTIPLE, $existingQuestion);
         if (!$base) {
             return null;
         }
@@ -491,9 +522,9 @@ TXT,
         ]);
     }
 
-    private function normalizeQuestionMatching(array $q): ?array
+    private function normalizeQuestionMatching(array $q, ?array $existingQuestion = null): ?array
     {
-        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MATCHING);
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_MATCHING, $existingQuestion);
         if (!$base) {
             return null;
         }
@@ -552,9 +583,9 @@ TXT,
         ]);
     }
 
-    private function normalizeQuestionFillInBlank(array $q): ?array
+    private function normalizeQuestionFillInBlank(array $q, ?array $existingQuestion = null): ?array
     {
-        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_FILL_IN_BLANK);
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_FILL_IN_BLANK, $existingQuestion);
         if (!$base) {
             return null;
         }
@@ -601,9 +632,9 @@ TXT,
         ]);
     }
 
-    private function normalizeQuestionOrdering(array $q): ?array
+    private function normalizeQuestionOrdering(array $q, ?array $existingQuestion = null): ?array
     {
-        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_ORDERING);
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_ORDERING, $existingQuestion);
         if (!$base) {
             return null;
         }
@@ -637,9 +668,9 @@ TXT,
         ]);
     }
 
-    private function normalizeQuestionNumeric(array $q): ?array
+    private function normalizeQuestionNumeric(array $q, ?array $existingQuestion = null): ?array
     {
-        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_NUMERIC);
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_NUMERIC, $existingQuestion);
         if (!$base) {
             return null;
         }

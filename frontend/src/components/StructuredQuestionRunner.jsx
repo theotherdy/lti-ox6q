@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Alert } from '@instructure/ui-alerts'
 import { Button } from '@instructure/ui-buttons'
 import { View } from '@instructure/ui-view'
@@ -79,7 +79,12 @@ function renderPrompt(promptHtml) {
   return <span dangerouslySetInnerHTML={{ __html: promptHtml }} />
 }
 
+function statusTag(text, color) {
+  return <span style={{ color, fontWeight: 700 }}>{text}</span>
+}
+
 export default function StructuredQuestionRunner({ pkg }) {
+  const q = pkg?.questions?.[0] || {}
   const [submitted, setSubmitted] = useState(false)
   const [singleChoice, setSingleChoice] = useState('')
   const [multiChoice, setMultiChoice] = useState({})
@@ -87,25 +92,47 @@ export default function StructuredQuestionRunner({ pkg }) {
   const [blanks, setBlanks] = useState({})
   const [order, setOrder] = useState([])
   const [numeric, setNumeric] = useState('')
+  const [attemptCount, setAttemptCount] = useState(0)
+  const [lastSubmissionCorrect, setLastSubmissionCorrect] = useState(false)
+  const [revealUnlocked, setRevealUnlocked] = useState(false)
+  const [sessionNonce, setSessionNonce] = useState(0)
 
   const validationError = useMemo(() => validateStructuredPayload(pkg), [pkg])
+  const revealEnabled = q.reveal_correct_after_two_incorrect_attempts !== false
 
-  if (validationError) {
-    return <Alert variant="error">{validationError}</Alert>
+  function resetQuestionSession() {
+    setSubmitted(false)
+    setSingleChoice('')
+    setMultiChoice({})
+    setMatches({})
+    setBlanks({})
+    setOrder([])
+    setNumeric('')
+    setAttemptCount(0)
+    setLastSubmissionCorrect(false)
+    setRevealUnlocked(false)
+    setSessionNonce((n) => n + 1)
   }
 
-  const q = pkg.questions[0]
+  useEffect(() => {
+    resetQuestionSession()
+  }, [q.id, q.question_type])
+
   const displayedOptions = useMemo(() => {
     if (!Array.isArray(q.options)) return []
     if (!q.shuffle_options) return q.options
     return shuffledCopy(q.options)
-  }, [q.id, q.question_type, q.shuffle_options, q.options])
+  }, [q.id, q.question_type, q.shuffle_options, q.options, sessionNonce])
 
   const orderIds = useMemo(() => {
     if (q.question_type !== 'ordering') return []
     if (order.length > 0) return order
-    return q.items.map((i) => i.id)
+    return (q.items || []).map((i) => i.id)
   }, [q, order])
+
+  if (validationError) {
+    return <Alert variant="error">{validationError}</Alert>
+  }
 
   function isComplete() {
     switch (q.question_type) {
@@ -162,9 +189,7 @@ export default function StructuredQuestionRunner({ pkg }) {
       case 'numeric': {
         const input = Number(numeric)
         if (Number.isNaN(input)) return false
-        if (q.answer_mode === 'exact') {
-          return input === Number(q.correct_value)
-        }
+        if (q.answer_mode === 'exact') return input === Number(q.correct_value)
         if (typeof q.target_value === 'number' && typeof q.tolerance === 'number') {
           return Math.abs(input - Number(q.target_value)) <= Number(q.tolerance)
         }
@@ -191,36 +216,42 @@ export default function StructuredQuestionRunner({ pkg }) {
 
   function onCheckAnswer() {
     if (!isComplete()) return
+    const correct = getResult()
+    const nextAttempt = attemptCount + 1
     setSubmitted(true)
+    setAttemptCount(nextAttempt)
+    setLastSubmissionCorrect(correct)
+
+    if (!correct && revealEnabled && nextAttempt >= 3) {
+      setRevealUnlocked(true)
+    }
   }
 
   function getNumericExpectedText() {
     if (q.question_type !== 'numeric') return ''
-    if (q.answer_mode === 'exact') {
-      return `Correct answer: ${q.correct_value}.`
-    }
+    if (q.answer_mode === 'exact') return `Correct answer: ${q.correct_value}`
     if (typeof q.target_value === 'number' && typeof q.tolerance === 'number') {
-      return `Accepted answer: ${q.target_value} +/- ${q.tolerance}.`
+      return `Accepted answer: ${q.target_value} +/- ${q.tolerance}`
     }
     if (typeof q.min_value === 'number' && typeof q.max_value === 'number') {
-      return `Accepted range: ${q.min_value} to ${q.max_value}.`
+      return `Accepted range: ${q.min_value} to ${q.max_value}`
     }
     return ''
   }
 
-  function getFeedbackMessage(correct) {
-    if (q.question_type === 'numeric') {
-      const expected = getNumericExpectedText()
-      if (correct) {
-        return expected ? `Correct. ${expected}` : 'Correct.'
-      }
-      return expected ? `Incorrect. ${expected}` : 'Incorrect.'
-    }
-    if (correct) return 'Correct.'
-    return 'Incorrect.'
-  }
+  const shouldRevealCorrect = revealUnlocked || (submitted && lastSubmissionCorrect)
+  const canCheckAnswer = attemptCount < 3
+  const matchingExpected = new Map((q.correct_matches || []).map((m) => [m.prompt_id, m.choice_id]))
 
-  const isCorrect = submitted ? getResult() : false
+  function getFeedbackMessage() {
+    if (submitted) {
+      if (lastSubmissionCorrect) return 'Correct.'
+      if (shouldRevealCorrect) return "Not quite. Here's the correct answer."
+      return `Not quite. Try again. Attempt ${attemptCount} of 3.`
+    }
+    if (revealUnlocked) return 'Correct answer shown after multiple attempts.'
+    return ''
+  }
 
   return (
     <View as="div" borderWidth="small" borderRadius="medium" padding="medium" background="primary">
@@ -237,6 +268,8 @@ export default function StructuredQuestionRunner({ pkg }) {
             <Flex as="div" direction="column" gap="small">
               {displayedOptions.map((option) => {
                 const inputId = `${q.id}-${option.id}`
+                const isCorrectOption = option.id === q.correct_option_id
+                const isIncorrectSelection = singleChoice === option.id && !isCorrectOption
                 return (
                   <label key={option.id} htmlFor={inputId} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', cursor: 'pointer' }}>
                     <input
@@ -251,7 +284,11 @@ export default function StructuredQuestionRunner({ pkg }) {
                       }}
                       aria-label={`Answer: ${option.text}`}
                     />
-                    <span>{option.text}</span>
+                    <span>
+                      {option.text}{' '}
+                      {shouldRevealCorrect && isCorrectOption ? statusTag('[Correct]', 'green') : null}
+                      {shouldRevealCorrect && isIncorrectSelection ? statusTag('[Incorrect]', 'red') : null}
+                    </span>
                   </label>
                 )
               })}
@@ -262,6 +299,8 @@ export default function StructuredQuestionRunner({ pkg }) {
             <Flex as="div" direction="column" gap="small">
               {displayedOptions.map((option) => {
                 const inputId = `${q.id}-${option.id}`
+                const isCorrectOption = (q.correct_option_ids || []).includes(option.id)
+                const isIncorrectSelection = Boolean(multiChoice[option.id]) && !isCorrectOption
                 return (
                   <label key={option.id} htmlFor={inputId} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', cursor: 'pointer' }}>
                     <input
@@ -274,7 +313,11 @@ export default function StructuredQuestionRunner({ pkg }) {
                       }}
                       aria-label={`Answer: ${option.text}`}
                     />
-                    <span>{option.text}</span>
+                    <span>
+                      {option.text}{' '}
+                      {shouldRevealCorrect && isCorrectOption ? statusTag('[Correct]', 'green') : null}
+                      {shouldRevealCorrect && isIncorrectSelection ? statusTag('[Incorrect]', 'red') : null}
+                    </span>
                   </label>
                 )
               })}
@@ -283,43 +326,66 @@ export default function StructuredQuestionRunner({ pkg }) {
 
           {q.question_type === 'matching' && (
             <Flex as="div" direction="column" gap="small">
-              {q.prompts.map((prompt) => (
-                <label key={prompt.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                  <span>{prompt.text}</span>
-                  <select
-                    value={matches[prompt.id] || ''}
-                    onChange={(e) => {
-                      setMatches((xs) => ({ ...xs, [prompt.id]: e.target.value }))
-                      setSubmitted(false)
-                    }}
-                    aria-label={`Match for ${prompt.text}`}
-                  >
-                    <option value="">Select a match</option>
-                    {q.choices.map((choice) => (
-                      <option key={choice.id} value={choice.id}>{choice.text}</option>
-                    ))}
-                  </select>
-                </label>
-              ))}
+              {q.prompts.map((prompt) => {
+                const expectedId = matchingExpected.get(prompt.id)
+                const selectedId = matches[prompt.id]
+                const isCorrect = selectedId === expectedId
+                const expectedText = (q.choices || []).find((choice) => choice.id === expectedId)?.text || ''
+
+                return (
+                  <label key={prompt.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                    <span>{prompt.text}</span>
+                    <select
+                      value={selectedId || ''}
+                      onChange={(e) => {
+                        setMatches((xs) => ({ ...xs, [prompt.id]: e.target.value }))
+                        setSubmitted(false)
+                      }}
+                      aria-label={`Match for ${prompt.text}`}
+                    >
+                      <option value="">Select a match</option>
+                      {q.choices.map((choice) => (
+                        <option key={choice.id} value={choice.id}>{choice.text}</option>
+                      ))}
+                    </select>
+                    {shouldRevealCorrect && (
+                      <Text>
+                        {isCorrect ? statusTag('[Correct] ', 'green') : statusTag('[Incorrect] ', 'red')}
+                        {!isCorrect && expectedText ? `Correct: ${expectedText}` : ''}
+                      </Text>
+                    )}
+                  </label>
+                )
+              })}
             </Flex>
           )}
 
           {q.question_type === 'fill_in_blank' && (
             <Flex as="div" direction="column" gap="small">
-              {q.blanks.map((blank) => (
-                <label key={blank.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                  <span>Blank: {blank.id}</span>
-                  <input
-                    type="text"
-                    value={blanks[blank.id] || ''}
-                    onChange={(e) => {
-                      setBlanks((xs) => ({ ...xs, [blank.id]: e.target.value }))
-                      setSubmitted(false)
-                    }}
-                    aria-label={`Answer for ${blank.id}`}
-                  />
-                </label>
-              ))}
+              {q.blanks.map((blank) => {
+                const studentAnswer = blanks[blank.id] || ''
+                const isCorrect = blank.acceptable_answers.some((a) => normalize(a) === normalize(studentAnswer))
+                return (
+                  <label key={blank.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                    <span>Blank: {blank.id}</span>
+                    <input
+                      type="text"
+                      value={studentAnswer}
+                      onChange={(e) => {
+                        setBlanks((xs) => ({ ...xs, [blank.id]: e.target.value }))
+                        setSubmitted(false)
+                      }}
+                      aria-label={`Answer for ${blank.id}`}
+                    />
+                    {shouldRevealCorrect && (
+                      <Text>
+                        {isCorrect ? statusTag('[Correct] ', 'green') : statusTag('[Incorrect] ', 'red')}
+                        {!isCorrect ? `Accepted: ${blank.acceptable_answers.join(', ')}` : ''}
+                      </Text>
+                    )}
+                  </label>
+                )
+              })}
             </Flex>
           )}
 
@@ -328,11 +394,17 @@ export default function StructuredQuestionRunner({ pkg }) {
               {orderIds.map((id, index) => {
                 const item = q.items.find((x) => x.id === id)
                 if (!item) return null
+                const isCorrectPosition = q.correct_order[index] === id
                 return (
-                  <Flex key={id} alignItems="center" gap="small">
+                  <Flex key={id} alignItems="center" gap="small" wrap="wrap">
                     <Text>{index + 1}. {item.text}</Text>
                     <Button size="small" onClick={() => moveOrder(index, -1)} disabled={index === 0}>Up</Button>
                     <Button size="small" onClick={() => moveOrder(index, 1)} disabled={index === orderIds.length - 1}>Down</Button>
+                    {shouldRevealCorrect && (
+                      <Text>
+                        {isCorrectPosition ? statusTag('[Correct]', 'green') : statusTag('[Incorrect]', 'red')}
+                      </Text>
+                    )}
                   </Flex>
                 )
               })}
@@ -340,36 +412,45 @@ export default function StructuredQuestionRunner({ pkg }) {
           )}
 
           {q.question_type === 'numeric' && (
-            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-              <span>Numeric answer</span>
-              <input
-                type="number"
-                value={numeric}
-                onChange={(e) => {
-                  setNumeric(e.target.value)
-                  setSubmitted(false)
-                }}
-                aria-label="Numeric answer"
-                style={{ textAlign: 'right' }}
-              />
-            </label>
+            <Flex as="div" direction="column" gap="x-small">
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                <span>Numeric answer</span>
+                <input
+                  type="number"
+                  value={numeric}
+                  onChange={(e) => {
+                    setNumeric(e.target.value)
+                    setSubmitted(false)
+                  }}
+                  aria-label="Numeric answer"
+                  style={{ textAlign: 'right' }}
+                />
+              </label>
+              {shouldRevealCorrect && (
+                <Text>
+                  {lastSubmissionCorrect ? statusTag('[Correct] ', 'green') : statusTag('[Incorrect] ', 'red')}
+                  {getNumericExpectedText()}
+                </Text>
+              )}
+            </Flex>
           )}
         </fieldset>
 
         <Flex gap="small" alignItems="center">
-          <Button onClick={onCheckAnswer} disabled={!isComplete()} color="primary">
-            Check answer
-          </Button>
-          {submitted && (
-            <Text aria-live="polite" color={isCorrect ? 'success' : 'danger'}>
-              {isCorrect ? 'Correct.' : 'Not quite. Try again.'}
-            </Text>
+          {canCheckAnswer ? (
+            <Button onClick={onCheckAnswer} disabled={!isComplete()} color="primary">
+              Check answer
+            </Button>
+          ) : (
+            <Button onClick={resetQuestionSession} color="primary">
+              Start again
+            </Button>
           )}
         </Flex>
 
-        {submitted && (
-          <Alert variant={isCorrect ? 'success' : 'warning'}>
-            {getFeedbackMessage(isCorrect)}
+        {(submitted || revealUnlocked) && (
+          <Alert variant={lastSubmissionCorrect ? 'success' : 'warning'}>
+            <Text aria-live="polite">{getFeedbackMessage()}</Text>
           </Alert>
         )}
       </Flex>

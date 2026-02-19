@@ -1,14 +1,30 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert } from '@instructure/ui-alerts'
 import { View } from '@instructure/ui-view'
-import { ToggleDetails } from '@instructure/ui-toggle-details'
-import { Heading } from '@instructure/ui-heading'
-import { List } from '@instructure/ui-list'
-import { Badge } from '@instructure/ui-badge'
 import { Text } from '@instructure/ui-text'
 import { Flex } from '@instructure/ui-flex'
 
+const DEFAULT_IFRAME_HEIGHT = 600
+const MIN_IFRAME_HEIGHT = 320
+const MAX_IFRAME_HEIGHT = 4000
+const MAX_SET_STATE_PAYLOAD_BYTES = 20000
+const MAX_NOTIFY_PAYLOAD_BYTES = 2000
+const ALLOWED_MESSAGE_TYPES = new Set(['resize', 'getState', 'setState', 'notify'])
 
+function createChannelToken() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function fitsJsonSize(value, maxBytes) {
+  try {
+    return JSON.stringify(value).length <= maxBytes
+  } catch {
+    return false
+  }
+}
 
 function jsonHeaders(token) {
   const h = { 'Content-Type': 'application/json' }
@@ -16,7 +32,7 @@ function jsonHeaders(token) {
   return h
 }
 
-function buildSrcDoc(pkg) {
+function buildSrcDoc(pkg, channel) {
   const title = pkg.title || 'Learning App'
   const html = pkg.html || "<div id='app'></div>"
   const css = pkg.css || ''
@@ -29,12 +45,14 @@ function buildSrcDoc(pkg) {
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>${title}</title>
+    <style>html,body{margin:0;padding:0;}</style>
     <style>${css}</style>
   </head>
   <body>
     ${html}
     <script>
       (function(){
+        const CHANNEL = ${JSON.stringify(channel)};
         const pending = new Map();
         let nextId = 1;
 
@@ -42,13 +60,13 @@ function buildSrcDoc(pkg) {
           return new Promise((resolve, reject) => {
             const id = nextId++;
             pending.set(id, {resolve, reject});
-            window.parent.postMessage({ __ox6q: true, id, type, payload }, '*');
+            window.parent.postMessage({ __ox6q: true, channel: CHANNEL, id, type, payload }, '*');
           });
         }
 
         window.addEventListener('message', (event) => {
           const msg = event.data;
-          if (!msg || msg.__ox6q !== true || !msg.replyTo) return;
+          if (!msg || msg.__ox6q !== true || msg.channel !== CHANNEL || !msg.replyTo) return;
           const entry = pending.get(msg.replyTo);
           if (!entry) return;
           pending.delete(msg.replyTo);
@@ -70,6 +88,63 @@ function buildSrcDoc(pkg) {
         
         // Nice dev-friendly shim: if generated apps call alert(), turn it into a notify.
         window.alert = (msg) => window.sdk.notify({ variant: 'info', message: String(msg) });
+
+        let resizeTimer = null;
+        let lastHeight = 0;
+
+        function getDocHeight() {
+          const body = document.body;
+          const html = document.documentElement;
+          if (!body || !html) return 0;
+          return Math.max(
+            body.scrollHeight,
+            body.offsetHeight,
+            html.scrollHeight,
+            html.offsetHeight,
+            html.clientHeight
+          );
+        }
+
+        function postResize() {
+          const next = Math.ceil(getDocHeight());
+          if (!Number.isFinite(next) || next <= 0) return;
+          if (Math.abs(next - lastHeight) < 2) return;
+          lastHeight = next;
+          window.parent.postMessage({
+            __ox6q: true,
+            channel: CHANNEL,
+            type: 'resize',
+            payload: { height: next }
+          }, '*');
+        }
+
+        function scheduleResize() {
+          if (resizeTimer) clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(postResize, 60);
+        }
+
+        if (window.ResizeObserver) {
+          const ro = new ResizeObserver(scheduleResize);
+          ro.observe(document.documentElement);
+          if (document.body) ro.observe(document.body);
+        }
+
+        window.addEventListener('resize', scheduleResize);
+        window.addEventListener('load', () => {
+          postResize();
+          setTimeout(postResize, 100);
+          setTimeout(postResize, 400);
+        });
+
+        const mo = new MutationObserver(scheduleResize);
+        mo.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true
+        });
+
+        postResize();
       })();
     </script>
     <script>
@@ -81,13 +156,14 @@ ${js}
 
 export default function Runner({ apiBase, token, pkg, onError }) {
   const iframeRef = useRef(null)
-  const [log, setLog] = useState([])
   const [notices, setNotices] = useState([]) //used to display notifications from iFramed app via callParent('notify', payload);
+  const [iframeHeight, setIframeHeight] = useState(DEFAULT_IFRAME_HEIGHT)
+  const channel = useMemo(() => createChannelToken(), [pkg?.id])
 
   const srcDoc = useMemo(() => {
     if (!pkg) return null  //pkg will be null when first loads
-    return buildSrcDoc(pkg)
-  }, [pkg])
+    return buildSrcDoc(pkg, channel)
+  }, [pkg, channel])
 
   //helper for pushing notices from iFramed app into Alert in this container app
   function pushNotice({ message, variant }) {
@@ -103,6 +179,10 @@ export default function Runner({ apiBase, token, pkg, onError }) {
   }
 
   useEffect(() => {
+    setIframeHeight(DEFAULT_IFRAME_HEIGHT)
+  }, [pkg?.id])
+
+  useEffect(() => {
     const iframe = iframeRef.current
     if (!iframe) return
 
@@ -110,13 +190,25 @@ export default function Runner({ apiBase, token, pkg, onError }) {
       // Only accept messages from our iframe
       if (event.source !== iframe.contentWindow) return
       const msg = event.data
-      if (!msg || msg.__ox6q !== true || !msg.id || !msg.type) return
+      if (!msg || msg.__ox6q !== true || msg.channel !== channel || !msg.type) return
+      if (!ALLOWED_MESSAGE_TYPES.has(msg.type)) return
+
+      if (msg.type === 'resize') {
+        const rawHeight = msg.payload?.height
+        const parsed = Number(rawHeight)
+        if (!Number.isFinite(parsed)) return
+        const clamped = Math.max(MIN_IFRAME_HEIGHT, Math.min(MAX_IFRAME_HEIGHT, Math.ceil(parsed)))
+        setIframeHeight((prev) => (prev === clamped ? prev : clamped))
+        return
+      }
+
+      if (!msg.id) return
 
       const reply = async (ok, resultOrError) => {
         iframe.contentWindow.postMessage(
           ok
-            ? { __ox6q: true, replyTo: msg.id, ok: true, result: resultOrError }
-            : { __ox6q: true, replyTo: msg.id, ok: false, error: String(resultOrError) },
+            ? { __ox6q: true, channel, replyTo: msg.id, ok: true, result: resultOrError }
+            : { __ox6q: true, channel, replyTo: msg.id, ok: false, error: String(resultOrError) },
           '*'
         )
       }
@@ -132,12 +224,17 @@ export default function Runner({ apiBase, token, pkg, onError }) {
           }
           const body = await res.json().catch(() => ({}))
           if (!res.ok) throw new Error(body.error || res.statusText)
-          setLog((l) => [`getState → ${JSON.stringify(body.state)}`, ...l].slice(0, 8))
           await reply(true, body.state)
           return
         }
 
         if (msg.type === 'setState') {
+          if (!msg.payload || typeof msg.payload !== 'object' || !Object.prototype.hasOwnProperty.call(msg.payload, 'state')) {
+            throw new Error('setState payload must include state')
+          }
+          if (!fitsJsonSize(msg.payload?.state, MAX_SET_STATE_PAYLOAD_BYTES)) {
+            throw new Error('setState payload too large')
+          }
           const res = await fetch(`${apiBase}/api/apps/${pkg.id}/state`, {
             method: 'PUT',
             headers: jsonHeaders(token),
@@ -149,17 +246,29 @@ export default function Runner({ apiBase, token, pkg, onError }) {
           }
           const body = await res.json().catch(() => ({}))
           if (!res.ok) throw new Error(body.error || res.statusText)
-          setLog((l) => [`setState ← ${JSON.stringify(msg.payload?.state)}`, ...l].slice(0, 8))
           await reply(true, body)
           return
         }
 
         if (msg.type === 'notify') {
+          if (!msg.payload || typeof msg.payload !== 'object') {
+            throw new Error('notify payload must be an object')
+          }
+          const message = msg.payload?.message
+          const variant = msg.payload?.variant
+          if (message !== undefined && typeof message !== 'string') {
+            throw new Error('notify.message must be a string')
+          }
+          if (variant !== undefined && typeof variant !== 'string') {
+            throw new Error('notify.variant must be a string')
+          }
+          if (!fitsJsonSize(msg.payload, MAX_NOTIFY_PAYLOAD_BYTES)) {
+            throw new Error('notify payload too large')
+          }
           pushNotice({
-            message: msg.payload?.message,
-            variant: msg.payload?.variant,
+            message,
+            variant,
           })
-          setLog((l) => [`notify ← ${JSON.stringify(msg.payload)}`, ...l].slice(0, 8))
           await reply(true, { ok: true })
           return
         }
@@ -172,7 +281,7 @@ export default function Runner({ apiBase, token, pkg, onError }) {
 
     window.addEventListener('message', handleRpc)
     return () => window.removeEventListener('message', handleRpc)
-  }, [apiBase, onError, pkg, token])
+  }, [apiBase, channel, onError, pkg, token])
 
   if (!token) {
     return (
@@ -188,7 +297,7 @@ export default function Runner({ apiBase, token, pkg, onError }) {
   if (!pkg) {
     return (
       <View as="div" padding="medium">
-        <Text color="secondary">No application loaded yet.</Text>
+        <Text color="secondary">No application loaded yet. </Text>
         <Text color="secondary">
           Generate an app to begin.
         </Text>
@@ -204,7 +313,7 @@ export default function Runner({ apiBase, token, pkg, onError }) {
         borderWidth="small"
         borderRadius="medium"
         background="primary"
-        margin="0 0 medium 0"
+        margin="0"
         position="relative"
       >
         {/* !!!!!Don't allow any powers other than allow-scripts without serious thought!!!!!! */}
@@ -213,15 +322,18 @@ export default function Runner({ apiBase, token, pkg, onError }) {
           title="Learning app"
           sandbox="allow-scripts"
           srcDoc={srcDoc}
-          style={{ width: '100%', height: '600px', border: 'none', borderRadius: '8px' }}
+          style={{ width: '100%', height: `${iframeHeight}px`, border: 'none', borderRadius: '8px', display: 'block' }}
         />
         {/* Notification overlay */}
-        <View
-          as="div"
-          position="absolute"
-          insetInlineEnd="small"
-          insetBlockStart="small"
-          width="360px"
+        <div
+          style={{
+            position: 'absolute',
+            top: '0.75rem',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 'min(520px, calc(100% - 1.5rem))',
+            zIndex: 15,
+          }}
         >
           <Flex direction="column" gap="x-small">
             {notices.map((n) => (
@@ -230,35 +342,8 @@ export default function Runner({ apiBase, token, pkg, onError }) {
               </Alert>
             ))}
           </Flex>
-        </View>
+        </div>
       </View>
-
-      {/* Collapsible SDK log */}
-      <ToggleDetails
-        summary={
-          <Flex gap="small" alignItems="center">
-            <Heading level="h4">SDK Call Log</Heading>
-            <Badge count={log.length} />
-          </Flex>
-        }
-        defaultExpanded={false}
-      >
-        <View as="div" background="secondary" padding="small" borderRadius="medium">
-          {log.length === 0 ? (
-            <Text color="secondary">No SDK calls yet</Text>
-          ) : (
-            <List isUnstyled margin="0">
-              {log.map((x, i) => (
-                <List.Item key={i}>
-                  <Text fontFamily="monospace" size="small">
-                    {x}
-                  </Text>
-                </List.Item>
-              ))}
-            </List>
-          )}
-        </View>
-      </ToggleDetails>
     </View>
   )
 }

@@ -6,6 +6,7 @@
     "keywords": ["laravel", "framework"],
     "license": "MIT",
     "require": {
+        "ezyang/htmlpurifier": "^4.17",
         "php": "^8.2",
         "firebase/php-jwt": "^6.10",
         "laravel/framework": "^12.0",
