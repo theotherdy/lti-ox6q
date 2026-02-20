@@ -3,7 +3,6 @@ import { Alert } from '@instructure/ui-alerts'
 import { Button } from '@instructure/ui-buttons'
 import { View } from '@instructure/ui-view'
 import { Text } from '@instructure/ui-text'
-import { Heading } from '@instructure/ui-heading'
 import { Flex } from '@instructure/ui-flex'
 
 const SUPPORTED_TYPES = [
@@ -256,11 +255,6 @@ export default function StructuredQuestionRunner({ pkg }) {
   return (
     <View as="div" borderWidth="small" borderRadius="medium" padding="medium" background="primary">
       <Flex direction="column" gap="medium">
-        <div>
-          <Heading level="h3" margin="0 0 x-small 0">{pkg.title || 'Question'}</Heading>
-          <Text color="secondary">{q.points_possible ?? 1} point{(q.points_possible ?? 1) === 1 ? '' : 's'}</Text>
-        </div>
-
         <fieldset style={{ border: 0, margin: 0, padding: 0 }}>
           <legend style={{ marginBottom: '0.75rem', fontWeight: 600 }}>{renderPrompt(q.prompt_html)}</legend>
 

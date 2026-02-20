@@ -36,7 +36,7 @@ class GenerateAppController extends Controller
 
         try {
             $res = Http::withToken(config('services.openai.key'))
-                ->timeout(90)
+                ->timeout((int) env('OPENAI_TIMEOUT', 180))
                 ->retry(2, 1000)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
@@ -884,12 +884,14 @@ MSG;
             'generation_mode' => 'required|string|in:' . self::KIND_STRUCTURED_QUESTION_SET . ',' . self::KIND_OPEN_INTERACTION,
             'question_type' => 'nullable|string',
             'convert_mode' => 'nullable|boolean',
+            'start_fresh' => 'nullable|boolean',
         ]);
 
         $preview = (bool) $request->input('preview', false);
         $generationMode = (string) $request->input('generation_mode');
         $questionType = $request->input('question_type');
         $convertMode = (bool) $request->input('convert_mode', false);
+        $startFresh = (bool) $request->input('start_fresh', false);
         $existingApp = null;
 
         if ($request->has('app_id')) {
@@ -899,9 +901,13 @@ MSG;
             }
         }
 
+        // When starting fresh, don't pass existing content to the LLM — generate from scratch
+        // but still save to the existing app record so the LTI custom app_id remains valid.
+        $existingAppForLlm = ($startFresh) ? null : $existingApp;
+
         $existingStructured = null;
-        if ($existingApp && ($existingApp->kind ?? self::KIND_OPEN_INTERACTION) === self::KIND_STRUCTURED_QUESTION_SET) {
-            $decoded = json_decode((string) ($existingApp->structured_json ?? ''), true);
+        if ($existingAppForLlm && ($existingAppForLlm->kind ?? self::KIND_OPEN_INTERACTION) === self::KIND_STRUCTURED_QUESTION_SET) {
+            $decoded = json_decode((string) ($existingAppForLlm->structured_json ?? ''), true);
             if (is_array($decoded)) {
                 $existingStructured = $decoded;
             }
@@ -924,7 +930,7 @@ MSG;
         $existingMode = $existingApp ? (string) ($existingApp->kind ?? self::KIND_OPEN_INTERACTION) : null;
         $existingType = $existingStructured['questions'][0]['question_type'] ?? null;
 
-        if ($existingApp) {
+        if ($existingApp && !$startFresh) {
             $modeChanged = ($existingMode !== $generationMode);
             $typeChanged = ($generationMode === self::KIND_STRUCTURED_QUESTION_SET && is_string($existingType) && $existingType !== $questionType);
             if (($modeChanged || $typeChanged) && !$convertMode) {
@@ -999,7 +1005,7 @@ MSG;
         }
 
         // open_interaction path
-        $openResult = $this->generateOpenInteractionPackage($request, $existingApp);
+        $openResult = $this->generateOpenInteractionPackage($request, $existingAppForLlm);
         if (($openResult['status'] ?? 500) !== 200) {
             return response()->json($openResult, $openResult['status'] ?? 500);
         }

@@ -82,9 +82,9 @@ export default function App() {
   const [elapsedTime, setElapsedTime] = useState(0)
   const timerRef = useRef(null)
 
-  const [pendingRevision, setPendingRevision] = useState(() => {
+  const [previousApp, setPreviousApp] = useState(() => {
     if (isLtiLaunch) return null
-    const raw = sessionStorage.getItem('pendingRevision')
+    const raw = sessionStorage.getItem('previousApp')
     if (!raw) return null
     try {
       return JSON.parse(raw)
@@ -92,16 +92,25 @@ export default function App() {
       return null
     }
   })
-  const [originalApp, setOriginalApp] = useState(null)
+  const [savedApp, setSavedApp] = useState(() => {
+    if (isLtiLaunch) return null
+    const raw = sessionStorage.getItem('savedApp')
+    if (!raw) return null
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  })
 
   const [isTrayOpen, setIsTrayOpen] = useState(true)
   const [generationMode, setGenerationMode] = useState(MODE_STRUCTURED)
   const [questionType, setQuestionType] = useState(DEFAULT_STRUCTURED_TYPE)
-  const [modeLocked, setModeLocked] = useState(false)
-  const [convertMode, setConvertMode] = useState(false)
+  const [showStartAgainConfirm, setShowStartAgainConfirm] = useState(false)
 
   const [deepLinkingJwt, setDeepLinkingJwt] = useState('')
   const [insertingDeepLink, setInsertingDeepLink] = useState(false)
+  const [savingForInsert, setSavingForInsert] = useState(false)
 
   const [editorOpen, setEditorOpen] = useState(false)
   const [isEditorFullScreen, setIsEditorFullScreen] = useState(false)
@@ -116,6 +125,8 @@ export default function App() {
   const canvasViewportHeightRef = useRef(null)
   const closeButtonContainerRef = useRef(null)
   const preEditHeightRef = useRef(null)
+  const startAgainRef = useRef(false)
+  const startAgainAppIdRef = useRef(null)
   // Keep refs in sync on every render so effect closures always read current values
   isEditorFullScreenRef.current = isEditorFullScreen
   canvasViewportHeightRef.current = canvasViewportHeight
@@ -126,7 +137,8 @@ export default function App() {
     sessionStorage.removeItem('bootstrapInfo')
     sessionStorage.removeItem('toolSupportJwt')
     sessionStorage.removeItem('ltiServer')
-    sessionStorage.removeItem('pendingRevision')
+    sessionStorage.removeItem('previousApp')
+    sessionStorage.removeItem('savedApp')
   }, [isLtiLaunch])
 
   useEffect(() => {
@@ -287,6 +299,8 @@ export default function App() {
         return
       }
       setAppPackage(body)
+      setSavedApp(body)
+      setPreviousApp(null)
       if (!isLtiLaunch) {
         sessionStorage.setItem('lastAppId', String(body.id))
       }
@@ -321,8 +335,11 @@ export default function App() {
       if (isRevising) {
         requestBody.app_id = appPackage.id
         requestBody.preview = true
-        requestBody.convert_mode = convertMode
-        setOriginalApp(appPackage)
+        requestBody.convert_mode = appPackage.kind !== generationMode ||
+          (generationMode === MODE_STRUCTURED && appPackage?.questions?.[0]?.question_type !== questionType)
+      } else if (startAgainRef.current && startAgainAppIdRef.current) {
+        requestBody.app_id = startAgainAppIdRef.current
+        requestBody.start_fresh = true
       }
 
       const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/generate`, {
@@ -341,9 +358,14 @@ export default function App() {
       }
 
       if (isRevising) {
-        setPendingRevision(body)
-      } else {
+        setPreviousApp(appPackage)
         setAppPackage(body)
+      } else {
+        startAgainRef.current = false
+        startAgainAppIdRef.current = null
+        setAppPackage(body)
+        setSavedApp(body)
+        setPreviousApp(null)
         if (body.id && !isLtiLaunch) {
           sessionStorage.setItem('lastAppId', String(body.id))
         }
@@ -360,29 +382,29 @@ export default function App() {
     }
   }
 
-  async function keepRevision() {
-    if (!pendingRevision || !accessToken) return
+  async function saveCurrentRevision() {
+    if (!appPackage || !accessToken) return false
 
-    const savePayload = pendingRevision.kind === MODE_STRUCTURED
+    const savePayload = appPackage.kind === MODE_STRUCTURED
       ? {
           kind: MODE_STRUCTURED,
-          schema_version: pendingRevision.schema_version,
-          title: pendingRevision.title,
-          questions: pendingRevision.questions,
-          meta: pendingRevision.meta || {},
+          schema_version: appPackage.schema_version,
+          title: appPackage.title,
+          questions: appPackage.questions,
+          meta: appPackage.meta || {},
           reset_non_instructor_state: resetNonInstructorStateOnSave,
         }
       : {
           kind: MODE_OPEN,
-          title: pendingRevision.title,
-          html: pendingRevision.html,
-          css: pendingRevision.css,
-          js: pendingRevision.js,
+          title: appPackage.title,
+          html: appPackage.html,
+          css: appPackage.css,
+          js: appPackage.js,
           reset_non_instructor_state: resetNonInstructorStateOnSave,
         }
 
     try {
-      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${pendingRevision.id}/save-revision`, {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appPackage.id}/save-revision`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -391,61 +413,68 @@ export default function App() {
       })
 
       if (res.status === 401) {
-        return
+        return false
       }
       if (!res.ok) {
         setErrorMessage(body.error || 'Failed to save revision')
-        return
+        return false
       }
 
-      setAppPackage(pendingRevision)
-      setPendingRevision(null)
-      setOriginalApp(null)
+      setSavedApp(appPackage)
+      setPreviousApp(null)
       setResetNonInstructorStateOnSave(false)
       setErrorMessage(null)
 
       if (editorOpen) {
-        setEditorOpen(false)
+        closeEditModal()
       }
+      return true
     } catch (e) {
       setErrorMessage(`Save error: ${String(e)}`)
+      return false
     }
   }
 
-  function revertRevision() {
-    if (originalApp) {
-      setAppPackage(originalApp)
+  function undoRevision() {
+    if (previousApp) {
+      setAppPackage(previousApp)
     }
+    setPreviousApp(null)
+  }
 
-    setPendingRevision(null)
-    setOriginalApp(null)
+  function cancelEditSession() {
+    setAppPackage(savedApp)
+    setSavedApp(null)
+    setPreviousApp(null)
+    closeEditModal()
   }
 
   function updateStructuredRevealSetting(enabled) {
-    const source = pendingRevision || appPackage
-    if (!source || source.kind !== MODE_STRUCTURED || !Array.isArray(source.questions) || !source.questions[0]) {
+    if (!appPackage || appPackage.kind !== MODE_STRUCTURED || !Array.isArray(appPackage.questions) || !appPackage.questions[0]) {
       return
     }
 
-    const nextQuestions = [...source.questions]
+    const nextQuestions = [...appPackage.questions]
     nextQuestions[0] = {
       ...nextQuestions[0],
       reveal_correct_after_two_incorrect_attempts: enabled,
     }
 
-    if (pendingRevision && pendingRevision.kind === MODE_STRUCTURED) {
-      setPendingRevision({
-        ...pendingRevision,
-        questions: nextQuestions,
-      })
-      return
-    }
-
-    setOriginalApp(appPackage)
-    setPendingRevision({
-      ...source,
+    setPreviousApp(appPackage)
+    setAppPackage({
+      ...appPackage,
       questions: nextQuestions,
     })
+  }
+
+  function startAgain() {
+    startAgainRef.current = true
+    startAgainAppIdRef.current = appPackage?.id ?? null
+    setAppPackage(null)
+    setPrompt('')
+    setPreviousApp(null)
+    setSavedApp(null)
+    setShowStartAgainConfirm(false)
   }
 
   async function clearApp() {
@@ -473,8 +502,9 @@ export default function App() {
 
       setAppPackage(null)
       setPrompt('')
-      setPendingRevision(null)
-      setOriginalApp(null)
+      setPreviousApp(null)
+      setSavedApp(null)
+      setShowStartAgainConfirm(false)
       if (!isLtiLaunch) {
         sessionStorage.removeItem('lastAppId')
       }
@@ -499,9 +529,12 @@ export default function App() {
       setErrorMessage('Generate an activity before inserting into Canvas.')
       return
     }
-    if (pendingRevision) {
-      setErrorMessage('Keep or revert the pending revision before inserting into Canvas.')
-      return
+
+    if (hasUnsavedChanges) {
+      setSavingForInsert(true)
+      const saved = await saveCurrentRevision()
+      setSavingForInsert(false)
+      if (!saved) return
     }
 
     const body = {
@@ -564,6 +597,8 @@ export default function App() {
   async function openEditModal() {
     preEditHeightRef.current = Math.round(window.innerHeight)
     if (!appPackage?.id) {
+      setSavedApp(appPackage)
+      setPreviousApp(null)
       setResetNonInstructorStateOnSave(false)
       setIsEditorFullScreen(true)
       setEditorOpen(true)
@@ -587,6 +622,8 @@ export default function App() {
       return
     }
 
+    setSavedApp(appPackage)
+    setPreviousApp(null)
     setResetNonInstructorStateOnSave(false)
     setIsEditorFullScreen(true)
     setEditorOpen(true)
@@ -595,6 +632,8 @@ export default function App() {
   function confirmResetAndEdit() {
     preEditHeightRef.current = Math.round(window.innerHeight)
     setShowStateResetWarning(false)
+    setSavedApp(appPackage)
+    setPreviousApp(null)
     setResetNonInstructorStateOnSave(true)
     setIsEditorFullScreen(true)
     setEditorOpen(true)
@@ -612,9 +651,7 @@ export default function App() {
     setShowStateResetWarning(false)
     setStateSummary(null)
     setResetNonInstructorStateOnSave(false)
-    setPendingRevision(null)
-    setOriginalApp(null)
-    setConvertMode(false)
+    setPreviousApp(null)
   }
 
   useEffect(() => {
@@ -633,6 +670,7 @@ export default function App() {
   useEffect(() => {
     if (!accessToken) return
     if (appPackage) return
+    if (startAgainRef.current) return
 
     const mappedAppId = bootstrapInfo?.app_id
     if (mappedAppId) {
@@ -651,8 +689,6 @@ export default function App() {
     if (!appPackage) {
       setGenerationMode(MODE_STRUCTURED)
       setQuestionType(DEFAULT_STRUCTURED_TYPE)
-      setModeLocked(false)
-      setConvertMode(false)
       return
     }
 
@@ -664,8 +700,6 @@ export default function App() {
     } else {
       setQuestionType(DEFAULT_STRUCTURED_TYPE)
     }
-    setModeLocked(true)
-    setConvertMode(false)
   }, [appPackage])
 
   useEffect(() => {
@@ -701,12 +735,20 @@ export default function App() {
   }, [accessToken, bootstrapInfo])
 
   useEffect(() => {
-    if (pendingRevision) {
-      sessionStorage.setItem('pendingRevision', JSON.stringify(pendingRevision))
+    if (previousApp) {
+      sessionStorage.setItem('previousApp', JSON.stringify(previousApp))
     } else {
-      sessionStorage.removeItem('pendingRevision')
+      sessionStorage.removeItem('previousApp')
     }
-  }, [pendingRevision])
+  }, [previousApp])
+
+  useEffect(() => {
+    if (savedApp) {
+      sessionStorage.setItem('savedApp', JSON.stringify(savedApp))
+    } else {
+      sessionStorage.removeItem('savedApp')
+    }
+  }, [savedApp])
 
   useEffect(() => {
     return () => {
@@ -803,7 +845,7 @@ export default function App() {
       mutationObserver.disconnect()
       resizeObserver?.disconnect()
     }
-  }, [isLtiLaunch, isResourceLaunch, editorOpen, appPackage?.id, pendingRevision?.id, errorMessage])
+  }, [isLtiLaunch, isResourceLaunch, editorOpen, appPackage?.id, errorMessage])
 
   // Intentional resize when edit mode or full-screen state changes — no observer teardown
   useEffect(() => {
@@ -847,17 +889,17 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [editorOpen])
 
-  const activePackage = pendingRevision || appPackage
+  const hasUnsavedChanges = savedApp !== null && appPackage !== savedApp
 
   function renderActivePackage() {
-    if (activePackage?.kind === MODE_STRUCTURED) {
-      return <StructuredRunnerFrame pkg={activePackage} />
+    if (appPackage?.kind === MODE_STRUCTURED) {
+      return <StructuredRunnerFrame pkg={appPackage} />
     }
     return (
       <Runner
         apiBase={API_BASE}
         token={accessToken}
-        pkg={activePackage}
+        pkg={appPackage}
         onError={setErrorMessage}
       />
     )
@@ -893,12 +935,6 @@ export default function App() {
               </IconButton>
             </Flex>
 
-            {isDeepLinkMode && (
-              <Alert variant="info" margin="0 0 small 0">
-                Generate a new activity and insert it into the Canvas page.
-              </Alert>
-            )}
-
             {errorMessage && (
               <Alert
                 variant="error"
@@ -911,24 +947,19 @@ export default function App() {
               </Alert>
             )}
 
-            {pendingRevision && (
-              <Alert
-                variant="warning"
-                margin="small 0"
-                renderCloseButtonLabel="Close"
-              >
-                <Flex direction="column" gap="small">
-                  <Heading level="h4">Revision Preview</Heading>
-                  <Text>Review the changes below. Keep to save permanently, or Revert to discard.</Text>
-                  <Flex gap="small">
-                    <Button onClick={keepRevision} color="success">
-                      Keep Revision
+            {showStartAgainConfirm && (
+              <Alert variant="warning" margin="small 0">
+                <View as="div">
+                  <Text>Start again? The current app will remain available to students until you save a new one.</Text>
+                  <View as="div" margin="x-small 0 0 0">
+                    <Button color="danger" margin="0 x-small 0 0" onClick={startAgain}>
+                      Yes, start again
                     </Button>
-                    <Button onClick={revertRevision} color="danger">
-                      Revert to Original
+                    <Button onClick={() => setShowStartAgainConfirm(false)}>
+                      Cancel
                     </Button>
-                  </Flex>
-                </Flex>
+                  </View>
+                </View>
               </Alert>
             )}
 
@@ -942,7 +973,6 @@ export default function App() {
                       name="generation_mode"
                       value={MODE_STRUCTURED}
                       checked={generationMode === MODE_STRUCTURED}
-                      disabled={modeLocked && !convertMode}
                       onChange={() => setGenerationMode(MODE_STRUCTURED)}
                     />
                     <span>Standard question type</span>
@@ -953,10 +983,9 @@ export default function App() {
                       name="generation_mode"
                       value={MODE_OPEN}
                       checked={generationMode === MODE_OPEN}
-                      disabled={modeLocked && !convertMode}
                       onChange={() => setGenerationMode(MODE_OPEN)}
                     />
-                    <span>Open interaction</span>
+                    <span>Freestyle activity</span>
                   </label>
                 </Flex>
               </View>
@@ -967,7 +996,6 @@ export default function App() {
                     <Text size="small" weight="bold">Question type</Text>
                     <select
                       value={questionType}
-                      disabled={modeLocked && !convertMode}
                       onChange={(e) => setQuestionType(e.target.value)}
                     >
                       <option value="multiple_choice_single_answer">Multiple choice (single answer)</option>
@@ -981,42 +1009,16 @@ export default function App() {
                 </View>
               )}
 
-              {(pendingRevision || appPackage)?.kind === MODE_STRUCTURED && (
+              {generationMode === MODE_STRUCTURED && (
                 <View as="div" margin="0 0 small 0">
                   <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
                     <input
                       type="checkbox"
-                      checked={(pendingRevision || appPackage)?.questions?.[0]?.reveal_correct_after_two_incorrect_attempts !== false}
+                      checked={appPackage?.questions?.[0]?.reveal_correct_after_two_incorrect_attempts !== false}
                       onChange={(e) => updateStructuredRevealSetting(e.target.checked)}
-                      disabled={generating}
+                      disabled={generating || !appPackage}
                     />
                     <span>Show correct answer after 2 incorrect attempts</span>
-                  </label>
-                </View>
-              )}
-
-              {appPackage && modeLocked && (
-                <View as="div" margin="0 0 small 0">
-                  <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
-                    <input
-                      type="checkbox"
-                      checked={convertMode}
-                      onChange={(e) => {
-                        const checked = e.target.checked
-                        setConvertMode(checked)
-                        if (!checked) {
-                          const modeValue = appPackage?.kind === MODE_STRUCTURED ? MODE_STRUCTURED : MODE_OPEN
-                          setGenerationMode(modeValue)
-                          if (modeValue === MODE_STRUCTURED) {
-                            setQuestionType(appPackage?.questions?.[0]?.question_type || DEFAULT_STRUCTURED_TYPE)
-                          } else {
-                            setQuestionType(DEFAULT_STRUCTURED_TYPE)
-                          }
-                        }
-                      }}
-                      disabled={generating || pendingRevision}
-                    />
-                    <span>Convert type/mode for this revision</span>
                   </label>
                 </View>
               )}
@@ -1034,43 +1036,65 @@ export default function App() {
                 height="100px"
               />
 
-              <Flex gap="small" margin="small 0">
+              <Flex gap="small" margin="small 0" justifyItems="end" style={{ flexWrap: 'wrap' }}>
+                {appPackage && !showStartAgainConfirm && (
+                  <Button
+                    onClick={() => setShowStartAgainConfirm(true)}
+                    disabled={generating}
+                  >
+                    Start again
+                  </Button>
+                )}
+
+                {previousApp && !generating && (
+                  <Button onClick={undoRevision}>
+                    Undo
+                  </Button>
+                )}
+
                 <Button
                   onClick={generateApp}
-                  disabled={generating || !prompt.trim() || !accessToken || pendingRevision || (generationMode === MODE_STRUCTURED && !questionType)}
-                  color="primary"
+                  disabled={generating || !prompt.trim() || !accessToken || (generationMode === MODE_STRUCTURED && !questionType)}
                 >
                   {generating
                     ? (appPackage ? 'Revising…' : 'Generating…')
                     : (appPackage ? 'Revise app' : 'Generate app')
                   }
                 </Button>
-
-                {appPackage && !isEditMode && (
-                  <Button
-                    onClick={clearApp}
-                    disabled={clearing || generating}
-                  >
-                    {clearing ? 'Clearing…' : 'Start Over'}
-                  </Button>
-                )}
-
               </Flex>
 
-              {isDeepLinkMode && (
-                <Flex gap="small" margin="small 0">
+              {isEditMode && (
+                <Flex gap="small" margin="small 0" justifyItems="end">
                   <Button
-                    onClick={insertDeepLinkItem}
-                    disabled={insertingDeepLink || generating || pendingRevision || !appPackage?.id}
-                    color="primary"
-                  >
-                    {insertingDeepLink ? 'Inserting…' : 'Insert into Canvas'}
-                  </Button>
-                  <Button
-                    onClick={cancelDeepLinkLaunch}
-                    disabled={insertingDeepLink || generating}
+                    onClick={cancelEditSession}
+                    disabled={generating}
                   >
                     Cancel
+                  </Button>
+                  <Button
+                    onClick={saveCurrentRevision}
+                    color="primary"
+                    disabled={generating || !hasUnsavedChanges}
+                  >
+                    Save
+                  </Button>
+                </Flex>
+              )}
+
+              {isDeepLinkMode && (
+                <Flex gap="small" margin="small 0" justifyItems="end">
+                  <Button
+                    onClick={cancelDeepLinkLaunch}
+                    disabled={insertingDeepLink || savingForInsert || generating}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={insertDeepLinkItem}
+                    disabled={insertingDeepLink || savingForInsert || generating || !appPackage?.id}
+                    color="primary"
+                  >
+                    {savingForInsert ? 'Saving…' : insertingDeepLink ? 'Inserting…' : 'Insert into Canvas'}
                   </Button>
                 </Flex>
               )}
@@ -1175,7 +1199,7 @@ export default function App() {
             <Flex direction="column" gap="small">
               <Heading level="h3">Reset Student Data?</Heading>
               <Text>
-                Editing this activity will reset saved learner state for this embedded instance.
+                If you save changes, saved learner progress for this activity will be reset.
               </Text>
               {stateSummary && (
                 <Text color="secondary">
@@ -1219,7 +1243,7 @@ export default function App() {
             <div ref={closeButtonContainerRef} style={{ position: 'absolute', top: '0.5rem', right: '0.5rem', zIndex: 10 }}>
               <IconButton
                 screenReaderLabel="Close editor"
-                onClick={closeEditModal}
+                onClick={cancelEditSession}
                 disabled={generating}
                 withBackground={true}
                 withBorder={true}
