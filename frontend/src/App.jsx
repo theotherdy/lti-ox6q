@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { LtiTokenRetriever, LtiPageSettings, LtiHeightLimit } from '@oxctl/ui-lti'
 import Runner from './components/Runner'
 import StructuredRunnerFrame from './components/StructuredRunnerFrame'
@@ -12,7 +12,7 @@ import { DrawerLayout } from '@instructure/ui-drawer-layout'
 import { Heading } from '@instructure/ui-heading'
 import { Text } from '@instructure/ui-text'
 import { Spinner } from '@instructure/ui-spinner'
-import { IconHamburgerLine } from '@instructure/ui-icons'
+import { IconHamburgerLine, IconXLine, IconFullScreenLine, IconExitFullScreenLine } from '@instructure/ui-icons'
 import { ScreenReaderContent } from '@instructure/ui-a11y-content'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -22,6 +22,7 @@ const DEFAULT_STRUCTURED_TYPE = 'multiple_choice_single_answer'
 const DEEP_LINK_IFRAME_WIDTH = 1000
 const DEEP_LINK_IFRAME_HEIGHT = 520
 const DEEP_LINK_PREVIEW_MIN_HEIGHT = 560
+const EDITOR_COMPACT_HEIGHT = 600
 
 function parseJwt(token) {
   if (!token || typeof token !== 'string') return null
@@ -103,12 +104,21 @@ export default function App() {
   const [insertingDeepLink, setInsertingDeepLink] = useState(false)
 
   const [editorOpen, setEditorOpen] = useState(false)
+  const [isEditorFullScreen, setIsEditorFullScreen] = useState(false)
+  const [canvasViewportHeight, setCanvasViewportHeight] = useState(null)
   const [showStateResetWarning, setShowStateResetWarning] = useState(false)
   const [stateSummary, setStateSummary] = useState(null)
   const [resetNonInstructorStateOnSave, setResetNonInstructorStateOnSave] = useState(false)
 
   const refreshInFlightRef = useRef(null)
   const contentRootRef = useRef(null)
+  const isEditorFullScreenRef = useRef(false)
+  const canvasViewportHeightRef = useRef(null)
+  const closeButtonContainerRef = useRef(null)
+  const preEditHeightRef = useRef(null)
+  // Keep refs in sync on every render so effect closures always read current values
+  isEditorFullScreenRef.current = isEditorFullScreen
+  canvasViewportHeightRef.current = canvasViewportHeight
 
   useEffect(() => {
     if (!isLtiLaunch) return
@@ -117,6 +127,28 @@ export default function App() {
     sessionStorage.removeItem('toolSupportJwt')
     sessionStorage.removeItem('ltiServer')
     sessionStorage.removeItem('pendingRevision')
+  }, [isLtiLaunch])
+
+  useEffect(() => {
+    if (!isLtiLaunch) return
+    const handleMessage = (e) => {
+      let data = e.data
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data) } catch { return }
+      }
+      if (data?.subject === 'lti.fetchWindowSize.response') {
+        if (Number.isFinite(data.height) && data.height > 0) {
+          setCanvasViewportHeight(data.height)
+        }
+      }
+    }
+    window.addEventListener('message', handleMessage)
+    const msg = JSON.stringify({ subject: 'lti.fetchWindowSize' })
+    window.parent.postMessage(msg, '*')
+    if (window.top && window.top !== window.parent) {
+      window.top.postMessage(msg, '*')
+    }
+    return () => window.removeEventListener('message', handleMessage)
   }, [isLtiLaunch])
 
   const tokenPayload = parseJwt(accessToken)
@@ -530,8 +562,10 @@ export default function App() {
   }
 
   async function openEditModal() {
+    preEditHeightRef.current = Math.round(window.innerHeight)
     if (!appPackage?.id) {
       setResetNonInstructorStateOnSave(false)
+      setIsEditorFullScreen(true)
       setEditorOpen(true)
       return
     }
@@ -554,12 +588,15 @@ export default function App() {
     }
 
     setResetNonInstructorStateOnSave(false)
+    setIsEditorFullScreen(true)
     setEditorOpen(true)
   }
 
   function confirmResetAndEdit() {
+    preEditHeightRef.current = Math.round(window.innerHeight)
     setShowStateResetWarning(false)
     setResetNonInstructorStateOnSave(true)
+    setIsEditorFullScreen(true)
     setEditorOpen(true)
   }
 
@@ -571,6 +608,7 @@ export default function App() {
 
   function closeEditModal() {
     setEditorOpen(false)
+    setIsEditorFullScreen(false)
     setShowStateResetWarning(false)
     setStateSummary(null)
     setResetNonInstructorStateOnSave(false)
@@ -704,7 +742,16 @@ export default function App() {
     }
 
     const postFrameResize = () => {
-      const nextHeight = getContentHeight()
+      let nextHeight
+      if (editorOpen && isEditorFullScreenRef.current) {
+        nextHeight = canvasViewportHeightRef.current ?? window.screen?.availHeight ?? 900
+      } else if (editorOpen) {
+        // Compact edit mode — content is position:fixed so document flow height is near-zero;
+        // restore the pre-edit height so observers don't fight the intentional resize
+        nextHeight = preEditHeightRef.current ?? EDITOR_COMPACT_HEIGHT
+      } else {
+        nextHeight = getContentHeight()
+      }
       if (!Number.isFinite(nextHeight) || nextHeight <= 0) return
 
       const height = Math.max(120, Math.ceil(nextHeight))
@@ -757,6 +804,48 @@ export default function App() {
       resizeObserver?.disconnect()
     }
   }, [isLtiLaunch, isResourceLaunch, editorOpen, appPackage?.id, pendingRevision?.id, errorMessage])
+
+  // Intentional resize when edit mode or full-screen state changes — no observer teardown
+  useEffect(() => {
+    if (!isLtiLaunch || !editorOpen) return
+    const height = isEditorFullScreen
+      ? (canvasViewportHeight ?? window.screen?.availHeight ?? 900)
+      : (preEditHeightRef.current ?? EDITOR_COMPACT_HEIGHT)
+    const payload = { subject: 'lti.frameResize', height: Math.ceil(height) }
+    window.parent.postMessage(payload, '*')
+    window.parent.postMessage(JSON.stringify(payload), '*')
+    if (window.top && window.top !== window.parent) {
+      window.top.postMessage(payload, '*')
+      window.top.postMessage(JSON.stringify(payload), '*')
+    }
+  }, [isLtiLaunch, editorOpen, isEditorFullScreen, canvasViewportHeight])
+
+  // Set document height synchronously (before MutationObserver fires) so LtiHeightLimit's
+  // internal observer measures the correct target height rather than the fixed-overlay content height.
+  // Uses `height` (not `min-height`) so that shrinking works: min-height can't override the current
+  // viewport height, but an explicit height forces the element to exactly the target value.
+  useLayoutEffect(() => {
+    if (!isLtiLaunch || !editorOpen) {
+      document.documentElement.style.height = ''
+      return
+    }
+    const height = isEditorFullScreen
+      ? (canvasViewportHeight ?? window.screen?.availHeight ?? 900)
+      : (preEditHeightRef.current ?? EDITOR_COMPACT_HEIGHT)
+    document.documentElement.style.height = `${Math.ceil(height)}px`
+    return () => {
+      document.documentElement.style.height = ''
+    }
+  }, [isLtiLaunch, editorOpen, isEditorFullScreen, canvasViewportHeight])
+
+  // Auto-focus close button when editor opens — standard accessible modal pattern
+  useEffect(() => {
+    if (!editorOpen) return
+    const timer = setTimeout(() => {
+      closeButtonContainerRef.current?.querySelector('button, [role="button"]')?.focus()
+    }, 50)
+    return () => clearTimeout(timer)
+  }, [editorOpen])
 
   const activePackage = pendingRevision || appPackage
 
@@ -966,14 +1055,6 @@ export default function App() {
                   </Button>
                 )}
 
-                {isEditMode && (
-                  <Button
-                    onClick={closeEditModal}
-                    disabled={generating}
-                  >
-                    Close Editor
-                  </Button>
-                )}
               </Flex>
 
               {isDeepLinkMode && (
@@ -1123,6 +1204,7 @@ export default function App() {
         >
           <div
             style={{
+              position: 'relative',
               width: '100%',
               height: '100%',
               background: '#fff',
@@ -1133,6 +1215,33 @@ export default function App() {
               boxSizing: 'border-box',
             }}
           >
+            {/* Floating close button — top right */}
+            <div ref={closeButtonContainerRef} style={{ position: 'absolute', top: '0.5rem', right: '0.5rem', zIndex: 10 }}>
+              <IconButton
+                screenReaderLabel="Close editor"
+                onClick={closeEditModal}
+                disabled={generating}
+                withBackground={true}
+                withBorder={true}
+                size="small"
+              >
+                <IconXLine />
+              </IconButton>
+            </div>
+
+            {/* Floating full-screen toggle — bottom right */}
+            <div style={{ position: 'absolute', bottom: '0.5rem', right: '0.5rem', zIndex: 10 }}>
+              <IconButton
+                screenReaderLabel={isEditorFullScreen ? 'Exit full screen' : 'Full screen'}
+                onClick={() => setIsEditorFullScreen((prev) => !prev)}
+                withBackground={true}
+                withBorder={true}
+                size="small"
+              >
+                {isEditorFullScreen ? <IconExitFullScreenLine /> : <IconFullScreenLine />}
+              </IconButton>
+            </div>
+
             {renderAuthoringDrawer('edit')}
           </div>
         </div>
