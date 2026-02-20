@@ -108,6 +108,7 @@ export default function App() {
   const [resetNonInstructorStateOnSave, setResetNonInstructorStateOnSave] = useState(false)
 
   const refreshInFlightRef = useRef(null)
+  const contentRootRef = useRef(null)
 
   useEffect(() => {
     if (!isLtiLaunch) return
@@ -683,15 +684,27 @@ export default function App() {
     let resizeTimer = null
     let lastHeight = 0
 
-    const postFrameResize = () => {
+    const getContentHeight = () => {
+      const root = contentRootRef.current
+      if (root) {
+        return Math.max(
+          root.scrollHeight || 0,
+          root.offsetHeight || 0,
+          Math.ceil(root.getBoundingClientRect().height || 0),
+        )
+      }
       const body = document.body
       const html = document.documentElement
-      const nextHeight = Math.max(
+      return Math.max(
         body?.scrollHeight ?? 0,
         body?.offsetHeight ?? 0,
         html?.scrollHeight ?? 0,
         html?.offsetHeight ?? 0,
       )
+    }
+
+    const postFrameResize = () => {
+      const nextHeight = getContentHeight()
       if (!Number.isFinite(nextHeight) || nextHeight <= 0) return
 
       const height = Math.max(120, Math.ceil(nextHeight))
@@ -702,6 +715,10 @@ export default function App() {
       // Canvas/LTI postMessage variants
       window.parent.postMessage(payload, '*')
       window.parent.postMessage(JSON.stringify(payload), '*')
+      if (window.top && window.top !== window.parent) {
+        window.top.postMessage(payload, '*')
+        window.top.postMessage(JSON.stringify(payload), '*')
+      }
     }
 
     const scheduleResize = () => {
@@ -1023,7 +1040,7 @@ export default function App() {
   }
 
   const content = (
-    <View as="div">
+    <div ref={contentRootRef}>
       {isResourceLaunch && !editorOpen ? (
         <View as="div" padding="small">
           {errorMessage && (
@@ -1124,16 +1141,18 @@ export default function App() {
       {isDeepLinkLaunch && (
         <DeepLinkForm deepLinkReturnUrl={deepLinkReturnUrl} deepLinkingJwt={deepLinkingJwt} />
       )}
-    </View>
+    </div>
   )
 
-  if (isLtiLaunch && !accessToken) {
+  if (isLtiLaunch) {
     return (
       <LtiPageSettings>
         <LtiHeightLimit>
-          <LtiTokenRetriever handleJwt={handleLtiJwt}>
-            {content}
-          </LtiTokenRetriever>
+          {!accessToken ? (
+            <LtiTokenRetriever handleJwt={handleLtiJwt}>
+              {content}
+            </LtiTokenRetriever>
+          ) : content}
         </LtiHeightLimit>
       </LtiPageSettings>
     )

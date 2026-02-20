@@ -11,7 +11,6 @@ services:
       RUN_MIGRATIONS: "0"
       CACHE_DRIVER: file
   frontend:
-    platform: linux/amd64 # For compatibility across windows and Mac
     build:
       context: ./frontend
     ports:
