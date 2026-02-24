@@ -1,5 +1,18 @@
 name: lti-ox6q
 services:
+  mariadb:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootsecret
+      MYSQL_DATABASE: lti_ox6q
+      MYSQL_USER: lti_user
+      MYSQL_PASSWORD: secret
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
   backend:
     build:
       context: ./backend
@@ -8,8 +21,18 @@ services:
     volumes:
       - ./backend/app:/var/www/html
     environment:
-      RUN_MIGRATIONS: "0"
-      CACHE_DRIVER: file
+      RUN_MIGRATIONS: "1"
+      DB_HOST: mariadb
+      DB_DATABASE: lti_ox6q
+      DB_USERNAME: lti_user
+      DB_PASSWORD: secret
+      TOOLSUPPORT_JWKS_URL: "https://tools-dev.canvas.ox.ac.uk/.well-known/jwks.json"
+      TOOLSUPPORT_JWT_ISS: "https://lti-dev.canvas.ox.ac.uk"
+      TOOLSUPPORT_JWT_AUD: "193670000000000568"
+      TOOLSUPPORT_SKIP_SIGNATURE: "false"
+    depends_on:
+      - mariadb
+
   frontend:
     build:
       context: ./frontend
@@ -20,5 +43,7 @@ services:
       - frontend_node_modules:/app/node_modules
     environment:
       VITE_API_BASE_URL: http://localhost:8000
+
 volumes:
+  mariadb_data:
   frontend_node_modules:

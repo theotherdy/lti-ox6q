@@ -7,8 +7,8 @@ FROM php:8.2-cli
 # System deps
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-     git unzip sqlite3 libsqlite3-dev curl ca-certificates \
-  && docker-php-ext-install pdo pdo_sqlite \
+     git unzip curl ca-certificates default-mysql-client \
+  && docker-php-ext-install pdo pdo_mysql \
   && rm -rf /var/lib/apt/lists/*
 
 # Composer

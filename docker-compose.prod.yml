@@ -1,0 +1,57 @@
+# Reference docker-compose for the production server.
+# Place this at /opt/lti-ox6q/docker-compose.yml on the server.
+# Place secrets at /opt/lti-ox6q/.env.prod (chmod 600).
+#
+# .env.prod must contain:
+#   APP_KEY=base64:...          (php artisan key:generate --show in a local container)
+#   DB_PASSWORD=...
+#   LOCAL_JWT_SECRET=...
+#   OPENAI_API_KEY=...
+#   TOOLSUPPORT_JWKS_URL=...
+#   TOOLSUPPORT_JWT_ISS=...
+#   TOOLSUPPORT_JWT_AUD=...
+
+name: lti-ox6q
+
+services:
+  mariadb:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: lti_ox6q
+      MYSQL_USER: lti_user
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    # NOT exposed publicly — backend connects via internal network
+    expose:
+      - "3306"
+
+  backend:
+    image: ghcr.io/OWNER/lti-ox6q/backend:latest   # replace OWNER
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: https://your-tool.example.com        # replace
+      FRONTEND_ORIGIN: https://your-tool.example.com # replace
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_DATABASE: lti_ox6q
+      DB_USERNAME: lti_user
+      RUN_MIGRATIONS: "1"
+    ports:
+      - "127.0.0.1:8000:80"   # bind to localhost only; Apache proxies here
+    depends_on:
+      - mariadb
+
+  frontend:
+    image: ghcr.io/OWNER/lti-ox6q/frontend:latest  # replace OWNER
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:80"   # bind to localhost only; Apache proxies here
+
+volumes:
+  mariadb_data:

@@ -1,0 +1,65 @@
+# Production backend: PHP-FPM + nginx + MariaDB driver
+
+# --- Stage 1: install Composer deps ---
+FROM composer:2 AS deps
+
+WORKDIR /app
+COPY app/composer.json app/composer.lock ./
+RUN composer install \
+    --no-dev \
+    --no-scripts \
+    --no-autoloader \
+    --prefer-dist \
+    --no-interaction
+
+# --- Stage 2: final image ---
+FROM php:8.2-fpm
+
+# System deps: nginx, supervisor, MariaDB client for wait-for-db in entrypoint
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+     nginx \
+     supervisor \
+     curl \
+     ca-certificates \
+     default-mysql-client \
+  && docker-php-ext-install pdo pdo_mysql opcache \
+  && rm -rf /var/lib/apt/lists/*
+
+# Recommended opcache settings for production
+RUN { \
+    echo 'opcache.enable=1'; \
+    echo 'opcache.memory_consumption=128'; \
+    echo 'opcache.interned_strings_buffer=8'; \
+    echo 'opcache.max_accelerated_files=10000'; \
+    echo 'opcache.revalidate_freq=0'; \
+    echo 'opcache.validate_timestamps=0'; \
+} > /usr/local/etc/php/conf.d/opcache.ini
+
+WORKDIR /var/www/html
+
+# Copy application source
+COPY app/ .
+
+# Copy Composer deps from stage 1 and generate optimised autoloader
+COPY --from=deps /app/vendor ./vendor
+RUN composer dump-autoload --no-dev --optimize --classmap-authoritative \
+    --working-dir=/var/www/html
+
+# Fix storage permissions
+RUN chown -R www-data:www-data storage bootstrap/cache \
+    && chmod -R 775 storage bootstrap/cache
+
+# nginx site config
+COPY docker/nginx.conf /etc/nginx/sites-available/default
+
+# supervisord config
+COPY docker/supervisord.conf /etc/supervisor/conf.d/app.conf
+
+# prod entrypoint
+COPY docker/entrypoint.prod.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 80
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/app.conf"]

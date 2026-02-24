@@ -1,0 +1,33 @@
+# Production frontend: Vite build → nginx static serve
+
+# --- Stage 1: build ---
+FROM node:20-bookworm-slim AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci --prefer-offline
+
+COPY . .
+
+# Both vars are baked into the JS bundle at build time.
+# VITE_API_BASE_URL: full origin + subpath, e.g. https://example.com/ox6q
+# VITE_BASE_PATH:    subpath with trailing slash, e.g. /ox6q/
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ARG VITE_BASE_PATH=/
+ENV VITE_BASE_PATH=${VITE_BASE_PATH}
+
+RUN npm run build
+
+# --- Stage 2: serve ---
+FROM nginx:1.27-alpine
+
+# Remove default site
+RUN rm /etc/nginx/conf.d/default.conf
+
+COPY docker/nginx-frontend.conf /etc/nginx/conf.d/default.conf
+
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
