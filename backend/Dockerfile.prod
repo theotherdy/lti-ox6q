@@ -5,7 +5,7 @@ FROM composer:2 AS deps
 
 WORKDIR /app
 COPY app/composer.json app/composer.lock ./
-RUN composer install \
+RUN COMPOSER_MEMORY_LIMIT=-1 composer install \
     --no-dev \
     --no-scripts \
     --no-autoloader \
