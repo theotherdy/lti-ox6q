@@ -8,7 +8,7 @@
     "require": {
         "ezyang/htmlpurifier": "^4.17",
         "php": "^8.2",
-        "firebase/php-jwt": "^6.10",
+        "firebase/php-jwt": "^7.0",
         "laravel/framework": "^12.0",
         "laravel/tinker": "^2.10.1"
     },
