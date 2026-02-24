@@ -42,7 +42,8 @@ WORKDIR /var/www/html
 # Copy application source
 COPY app/ .
 
-# Copy Composer deps from stage 1 and generate optimised autoloader
+# Copy Composer binary and deps from stage 1, generate optimised autoloader
+COPY --from=deps /usr/bin/composer /usr/bin/composer
 COPY --from=deps /app/vendor ./vendor
 RUN composer dump-autoload --no-dev --optimize --classmap-authoritative \
     --working-dir=/var/www/html
