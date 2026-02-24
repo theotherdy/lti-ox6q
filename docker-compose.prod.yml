@@ -29,14 +29,14 @@ services:
       - "3306"
 
   backend:
-    image: ghcr.io/OWNER/lti-ox6q/backend:latest   # replace OWNER
+    image: ghcr.io/theotherdy/lti-ox6q/backend:latest
     restart: unless-stopped
     env_file: .env.prod
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
-      APP_URL: https://your-tool.example.com        # replace
-      FRONTEND_ORIGIN: https://your-tool.example.com # replace
+      APP_URL: https://learntech.medsci.ox.ac.uk/ox6q
+      FRONTEND_ORIGIN: https://learntech.medsci.ox.ac.uk
       DB_HOST: mariadb
       DB_PORT: "3306"
       DB_DATABASE: lti_ox6q
@@ -48,7 +48,7 @@ services:
       - mariadb
 
   frontend:
-    image: ghcr.io/OWNER/lti-ox6q/frontend:latest  # replace OWNER
+    image: ghcr.io/theotherdy/lti-ox6q/frontend:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8001:80"   # bind to localhost only; Apache proxies here
