@@ -10,7 +10,8 @@ RUN COMPOSER_MEMORY_LIMIT=-1 composer install \
     --no-scripts \
     --no-autoloader \
     --prefer-dist \
-    --no-interaction
+    --no-interaction \
+    --ignore-platform-reqs
 
 # --- Stage 2: final image ---
 FROM php:8.2-fpm
