@@ -99,7 +99,7 @@ Set these in **Repository → Settings → Variables → Actions**:
 
 | Variable | Value |
 |----------|-------|
-| `PRODUCTION_URL` | `https://learntech.medsci.ox.ac.uk/ox6q` |
+| `PRODUCTION_URL` | `serverdomain/ox6q` |
 | `PRODUCTION_BASE` | `/ox6q/` |
 
 ### Images
