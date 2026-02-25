@@ -25,3 +25,4 @@ frontend/.vite
 *.log
 # Docker
 **/.env.*.local
+base_site.conf

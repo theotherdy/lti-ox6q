@@ -1,10 +1,11 @@
 # Reference docker-compose for the production server.
 # Place this at /opt/lti-ox6q/docker-compose.yml on the server.
-# Place secrets at /opt/lti-ox6q/.env.prod (chmod 600).
+# Place secrets at /opt/lti-ox6q/.env (chmod 600).
 #
-# .env.prod must contain:
+# .env must contain:
 #   APP_KEY=base64:...          (php artisan key:generate --show in a local container)
-#   DB_PASSWORD=...
+#   DB_PASSWORD=...             (single password for lti_user — used by both backend and mariadb)
+#   MYSQL_ROOT_PASSWORD=...     (strong random password for MariaDB root — not used by the app)
 #   LOCAL_JWT_SECRET=...
 #   OPENAI_API_KEY=...
 #   TOOLSUPPORT_JWKS_URL=...
@@ -18,10 +19,11 @@ services:
     image: mariadb:11
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      # Docker Compose resolves ${...} from the .env file in this directory
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: lti_ox6q
       MYSQL_USER: lti_user
-      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+      MYSQL_PASSWORD: ${DB_PASSWORD}
     volumes:
       - mariadb_data:/var/lib/mysql
     # NOT exposed publicly — backend connects via internal network
@@ -31,7 +33,7 @@ services:
   backend:
     image: ghcr.io/theotherdy/lti-ox6q/backend:latest
     restart: unless-stopped
-    env_file: .env.prod
+    env_file: .env
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
