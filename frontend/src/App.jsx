@@ -24,6 +24,24 @@ const DEEP_LINK_IFRAME_HEIGHT = 520
 const DEEP_LINK_PREVIEW_MIN_HEIGHT = 560
 const EDITOR_COMPACT_HEIGHT = 600
 
+const RIGHTS_BASIS_OPTIONS = [
+  { value: 'copyright_holder', label: 'I hold the copyright' },
+  { value: 'permission_obtained', label: 'I have obtained permission to use this file' },
+  { value: 'public_domain', label: 'Public domain' },
+  { value: 'instructional_exception', label: 'Image is subject to an exception (e.g., illustration for instruction)' },
+  { value: 'creative_commons', label: 'Creative Commons' },
+]
+
+const CC_LICENSE_OPTIONS = [
+  { value: 'cc_by', label: 'CC BY' },
+  { value: 'cc_by_sa', label: 'CC BY-SA' },
+  { value: 'cc_by_nd', label: 'CC BY-ND' },
+  { value: 'cc_by_nc', label: 'CC BY-NC' },
+  { value: 'cc_by_nc_sa', label: 'CC BY-NC-SA' },
+  { value: 'cc_by_nc_nd', label: 'CC BY-NC-ND' },
+  { value: 'cc0', label: 'CC0' },
+]
+
 function parseJwt(token) {
   if (!token || typeof token !== 'string') return null
   const parts = token.split('.')
@@ -107,6 +125,17 @@ export default function App() {
   const [generationMode, setGenerationMode] = useState(MODE_STRUCTURED)
   const [questionType, setQuestionType] = useState(DEFAULT_STRUCTURED_TYPE)
   const [showStartAgainConfirm, setShowStartAgainConfirm] = useState(false)
+  const [assets, setAssets] = useState([])
+  const [assetsLoading, setAssetsLoading] = useState(false)
+  const [uploadingAsset, setUploadingAsset] = useState(false)
+  const [deletingAssetId, setDeletingAssetId] = useState(null)
+  const [assetLabel, setAssetLabel] = useState('')
+  const [assetAlt, setAssetAlt] = useState('')
+  const [assetRightsBasis, setAssetRightsBasis] = useState('')
+  const [assetCcLicense, setAssetCcLicense] = useState('')
+  const [assetCopyrightHolder, setAssetCopyrightHolder] = useState('')
+  const [assetRightsNote, setAssetRightsNote] = useState('')
+  const [assetFile, setAssetFile] = useState(null)
 
   const [deepLinkingJwt, setDeepLinkingJwt] = useState('')
   const [insertingDeepLink, setInsertingDeepLink] = useState(false)
@@ -435,6 +464,105 @@ export default function App() {
     }
   }
 
+  async function loadAssets(appId = appPackage?.id) {
+    if (!appId || !accessToken || !isInstructor) {
+      setAssets([])
+      return
+    }
+
+    setAssetsLoading(true)
+    try {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appId}/assets`, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      })
+      if (res.status === 401) return
+      if (!res.ok) {
+        setErrorMessage(body.error || 'Failed to load app images')
+        return
+      }
+      setAssets(Array.isArray(body.assets) ? body.assets : [])
+    } catch (e) {
+      setErrorMessage(`Image list error: ${String(e)}`)
+    } finally {
+      setAssetsLoading(false)
+    }
+  }
+
+  async function uploadAssetImage() {
+    if (!appPackage?.id || !assetFile) return
+    if (!assetRightsBasis) {
+      setErrorMessage('Select a copyright basis before uploading.')
+      return
+    }
+    if (assetRightsBasis === 'creative_commons' && !assetCcLicense) {
+      setErrorMessage('Select a Creative Commons license subtype.')
+      return
+    }
+
+    const form = new FormData()
+    form.append('file', assetFile)
+    form.append('rights_basis', assetRightsBasis)
+    if (assetLabel.trim()) form.append('label', assetLabel.trim())
+    if (assetAlt.trim()) form.append('alt', assetAlt.trim())
+    if (assetCopyrightHolder.trim()) form.append('copyright_holder', assetCopyrightHolder.trim())
+    if (assetRightsNote.trim()) form.append('rights_note', assetRightsNote.trim())
+    if (assetRightsBasis === 'creative_commons') form.append('cc_license', assetCcLicense)
+
+    setUploadingAsset(true)
+    try {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appPackage.id}/assets/image`, {
+        method: 'POST',
+        body: form,
+      })
+      if (res.status === 401) return
+      if (!res.ok) {
+        setErrorMessage(body.error || 'Image upload failed')
+        return
+      }
+
+      setAssetFile(null)
+      setAssetLabel('')
+      setAssetAlt('')
+      setAssetRightsBasis('')
+      setAssetCcLicense('')
+      setAssetCopyrightHolder('')
+      setAssetRightsNote('')
+      setErrorMessage(null)
+      await loadAssets(appPackage.id)
+    } catch (e) {
+      setErrorMessage(`Image upload error: ${String(e)}`)
+    } finally {
+      setUploadingAsset(false)
+    }
+  }
+
+  async function deleteAssetImage(assetId) {
+    if (!appPackage?.id || !assetId) return
+    setDeletingAssetId(assetId)
+    try {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appPackage.id}/assets/${assetId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      })
+      if (res.status === 401) return
+      if (!res.ok) {
+        setErrorMessage(body.error || 'Failed to delete image')
+        return
+      }
+
+      setAssets((xs) => xs.filter((x) => x.id !== assetId))
+      setErrorMessage(null)
+    } catch (e) {
+      setErrorMessage(`Image delete error: ${String(e)}`)
+    } finally {
+      setDeletingAssetId(null)
+    }
+  }
+
   function undoRevision() {
     if (previousApp) {
       setAppPackage(previousApp)
@@ -684,6 +812,14 @@ export default function App() {
     if (!lastAppId) return
     loadAppById(lastAppId)
   }, [accessToken, appPackage, bootstrapInfo, isLtiLaunch])
+
+  useEffect(() => {
+    if (!appPackage?.id || !accessToken || !isInstructor) {
+      setAssets([])
+      return
+    }
+    loadAssets(appPackage.id)
+  }, [appPackage?.id, accessToken, isInstructor])
 
   useEffect(() => {
     if (!appPackage) {
@@ -1004,6 +1140,7 @@ export default function App() {
                       <option value="fill_in_blank">Fill in the blank</option>
                       <option value="ordering">Ordering</option>
                       <option value="numeric">Numeric</option>
+                      <option value="image_hotspot_single">Image hotspot (single answer)</option>
                     </select>
                   </label>
                 </View>
@@ -1020,6 +1157,149 @@ export default function App() {
                     />
                     <span>Show correct answer after 2 incorrect attempts</span>
                   </label>
+                </View>
+              )}
+
+              {isEditMode && isInstructor && appPackage?.id && (
+                <View as="div" margin="0 0 medium 0" padding="small" borderWidth="small" borderRadius="medium">
+                  <Flex direction="column" gap="small">
+                    <Text size="small" weight="bold">Images (app-scoped)</Text>
+                    <Text size="x-small" color="secondary">
+                      Copyright declaration is required before upload and cannot be edited later. To change rights metadata, delete and re-upload.
+                    </Text>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <Text size="small">Image file</Text>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(e) => setAssetFile(e.target.files?.[0] || null)}
+                        disabled={uploadingAsset}
+                      />
+                    </label>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <Text size="small">Copyright basis (required)</Text>
+                      <select
+                        value={assetRightsBasis}
+                        onChange={(e) => {
+                          const next = e.target.value
+                          setAssetRightsBasis(next)
+                          if (next !== 'creative_commons') setAssetCcLicense('')
+                        }}
+                        disabled={uploadingAsset}
+                      >
+                        <option value="">Select basis</option>
+                        {RIGHTS_BASIS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {assetRightsBasis === 'creative_commons' && (
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                        <Text size="small">Creative Commons type (required)</Text>
+                        <select
+                          value={assetCcLicense}
+                          onChange={(e) => setAssetCcLicense(e.target.value)}
+                          disabled={uploadingAsset}
+                        >
+                          <option value="">Select CC type</option>
+                          {CC_LICENSE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <Text size="small">Copyright holder (optional)</Text>
+                      <input
+                        type="text"
+                        value={assetCopyrightHolder}
+                        onChange={(e) => setAssetCopyrightHolder(e.target.value)}
+                        disabled={uploadingAsset}
+                      />
+                    </label>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <Text size="small">Label (optional)</Text>
+                      <input
+                        type="text"
+                        value={assetLabel}
+                        onChange={(e) => setAssetLabel(e.target.value)}
+                        disabled={uploadingAsset}
+                      />
+                    </label>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <Text size="small">Alt text (optional)</Text>
+                      <input
+                        type="text"
+                        value={assetAlt}
+                        onChange={(e) => setAssetAlt(e.target.value)}
+                        disabled={uploadingAsset}
+                      />
+                    </label>
+
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <Text size="small">Rights note (optional)</Text>
+                      <textarea
+                        value={assetRightsNote}
+                        onChange={(e) => setAssetRightsNote(e.target.value)}
+                        rows={2}
+                        disabled={uploadingAsset}
+                      />
+                    </label>
+
+                    <Flex gap="small" alignItems="center">
+                      <Button
+                        onClick={uploadAssetImage}
+                        color="primary"
+                        disabled={!assetFile || !assetRightsBasis || uploadingAsset || (assetRightsBasis === 'creative_commons' && !assetCcLicense)}
+                      >
+                        {uploadingAsset ? 'Uploading…' : 'Upload image'}
+                      </Button>
+                      <Button onClick={() => loadAssets()} disabled={assetsLoading || uploadingAsset}>
+                        Refresh list
+                      </Button>
+                    </Flex>
+
+                    <View as="div">
+                      <Text size="small" weight="bold">Current app images</Text>
+                      {assetsLoading ? (
+                        <Text size="small" color="secondary">Loading…</Text>
+                      ) : assets.length === 0 ? (
+                        <Text size="small" color="secondary">No images uploaded for this app.</Text>
+                      ) : (
+                        <Flex direction="column" gap="x-small" margin="x-small 0 0 0">
+                          {assets.map((asset) => (
+                            <View key={asset.id} as="div" borderWidth="small" borderRadius="small" padding="x-small">
+                              <Flex direction="column" gap="xx-small">
+                                <Text size="small"><strong>{asset.label || asset.id}</strong></Text>
+                                <Text size="x-small" color="secondary">
+                                  {asset.width}x{asset.height} · {(asset.bytes / 1024).toFixed(1)} KB · {asset.rights_basis}{asset.cc_license ? ` (${asset.cc_license})` : ''}
+                                </Text>
+                                {asset.copyright_holder ? (
+                                  <Text size="x-small" color="secondary">Copyright holder: {asset.copyright_holder}</Text>
+                                ) : null}
+                                <Text size="x-small" color="secondary" style={{ wordBreak: 'break-all' }}>{asset.url}</Text>
+                                <Flex gap="x-small">
+                                  <Button
+                                    size="small"
+                                    onClick={() => deleteAssetImage(asset.id)}
+                                    disabled={deletingAssetId === asset.id}
+                                  >
+                                    {deletingAssetId === asset.id ? 'Deleting…' : 'Delete'}
+                                  </Button>
+                                </Flex>
+                              </Flex>
+                            </View>
+                          ))}
+                        </Flex>
+                      )}
+                    </View>
+                  </Flex>
                 </View>
               )}
 

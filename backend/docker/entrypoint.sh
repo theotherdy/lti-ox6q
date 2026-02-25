@@ -79,4 +79,6 @@ if [ "${RUN_MIGRATIONS:-1}" = "1" ]; then
   php artisan migrate --force
 fi
 
+php artisan storage:link || true
+
 exec php artisan serve --host=0.0.0.0 --port=8000

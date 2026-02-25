@@ -78,4 +78,6 @@ if [ "${RUN_MIGRATIONS:-1}" = "1" ]; then
   php artisan migrate --force
 fi
 
+php artisan storage:link || true
+
 exec "$@"

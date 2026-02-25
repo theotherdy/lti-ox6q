@@ -16,6 +16,7 @@ class AppController extends Controller
         'fill_in_blank',
         'ordering',
         'numeric',
+        'image_hotspot_single',
     ];
 
     public function package(Request $request, $appId)
@@ -475,7 +476,79 @@ class AppController extends Controller
             return null;
         }
 
+        if ($type === 'image_hotspot_single') {
+            $image = $q['image'] ?? null;
+            if (!is_array($image)) {
+                return 'image_hotspot_single requires image metadata';
+            }
+            if (!is_string($image['asset_id'] ?? null) || trim($image['asset_id']) === '') {
+                return 'image_hotspot_single image.asset_id is required';
+            }
+            if (!is_string($image['url'] ?? null) || !$this->isAllowedAssetUrl($image['url'])) {
+                return 'image_hotspot_single image.url must be an absolute http(s) URL or /storage path';
+            }
+
+            $hotspots = $q['hotspots'] ?? null;
+            if (!is_array($hotspots) || count($hotspots) < 1 || count($hotspots) > 12) {
+                return 'image_hotspot_single requires 1-12 hotspots';
+            }
+
+            $seenIds = [];
+            foreach ($hotspots as $hotspot) {
+                if (!is_array($hotspot)) {
+                    return 'image_hotspot_single contains invalid hotspot';
+                }
+                $id = $hotspot['id'] ?? null;
+                if (!is_string($id) || trim($id) === '' || isset($seenIds[$id])) {
+                    return 'image_hotspot_single hotspot IDs must be unique non-empty strings';
+                }
+                $x = $hotspot['x'] ?? null;
+                $y = $hotspot['y'] ?? null;
+                $w = $hotspot['w'] ?? null;
+                $h = $hotspot['h'] ?? null;
+                if (!is_numeric($x) || !is_numeric($y) || !is_numeric($w) || !is_numeric($h)) {
+                    return 'image_hotspot_single hotspot coordinates must be numeric';
+                }
+
+                $x = (float) $x;
+                $y = (float) $y;
+                $w = (float) $w;
+                $h = (float) $h;
+
+                if ($x < 0 || $y < 0 || $w <= 0 || $h <= 0 || $x > 1 || $y > 1 || ($x + $w) > 1 || ($y + $h) > 1) {
+                    return 'image_hotspot_single hotspot coordinates must stay within normalized [0..1] bounds';
+                }
+
+                $seenIds[$id] = true;
+            }
+
+            $correctId = $q['correct_hotspot_id'] ?? null;
+            if (!is_string($correctId) || !isset($seenIds[$correctId])) {
+                return 'image_hotspot_single correct_hotspot_id must match one hotspot id';
+            }
+
+            return null;
+        }
+
         return 'Unsupported structured question type';
+    }
+
+    private function isAllowedAssetUrl(string $url): bool
+    {
+        $url = trim($url);
+        if ($url === '') {
+            return false;
+        }
+
+        if (str_starts_with($url, '/storage/')) {
+            return true;
+        }
+
+        if (!preg_match('/^https?:\\/\\/.+/i', $url)) {
+            return false;
+        }
+        $parts = parse_url($url);
+        return is_array($parts) && isset($parts['host']) && in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true);
     }
 
     private function validatePackage(array $pkg): array

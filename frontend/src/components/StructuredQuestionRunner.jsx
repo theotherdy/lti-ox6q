@@ -12,6 +12,7 @@ const SUPPORTED_TYPES = [
   'fill_in_blank',
   'ordering',
   'numeric',
+  'image_hotspot_single',
 ]
 
 function normalize(text) {
@@ -71,6 +72,13 @@ function validateStructuredPayload(pkg) {
     return null
   }
 
+  if (q.question_type === 'image_hotspot_single') {
+    if (!q.image || typeof q.image.url !== 'string') return 'Hotspot question is missing image metadata.'
+    if (!Array.isArray(q.hotspots) || q.hotspots.length < 1) return 'Hotspot question requires at least one hotspot.'
+    if (!q.correct_hotspot_id) return 'Hotspot question is missing correct hotspot metadata.'
+    return null
+  }
+
   return null
 }
 
@@ -91,6 +99,7 @@ export default function StructuredQuestionRunner({ pkg }) {
   const [blanks, setBlanks] = useState({})
   const [order, setOrder] = useState([])
   const [numeric, setNumeric] = useState('')
+  const [hotspotChoice, setHotspotChoice] = useState('')
   const [attemptCount, setAttemptCount] = useState(0)
   const [lastSubmissionCorrect, setLastSubmissionCorrect] = useState(false)
   const [revealUnlocked, setRevealUnlocked] = useState(false)
@@ -107,6 +116,7 @@ export default function StructuredQuestionRunner({ pkg }) {
     setBlanks({})
     setOrder([])
     setNumeric('')
+    setHotspotChoice('')
     setAttemptCount(0)
     setLastSubmissionCorrect(false)
     setRevealUnlocked(false)
@@ -147,6 +157,8 @@ export default function StructuredQuestionRunner({ pkg }) {
         return orderIds.length === q.items.length
       case 'numeric':
         return normalize(numeric).length > 0
+      case 'image_hotspot_single':
+        return Boolean(hotspotChoice)
       default:
         return false
     }
@@ -197,6 +209,8 @@ export default function StructuredQuestionRunner({ pkg }) {
         }
         return false
       }
+      case 'image_hotspot_single':
+        return hotspotChoice === q.correct_hotspot_id
       default:
         return false
     }
@@ -424,6 +438,57 @@ export default function StructuredQuestionRunner({ pkg }) {
                 <Text>
                   {lastSubmissionCorrect ? statusTag('[Correct] ', 'green') : statusTag('[Incorrect] ', 'red')}
                   {getNumericExpectedText()}
+                </Text>
+              )}
+            </Flex>
+          )}
+
+          {q.question_type === 'image_hotspot_single' && (
+            <Flex as="div" direction="column" gap="small">
+              <View as="div" style={{ position: 'relative', width: '100%', maxWidth: '960px', margin: '0 auto' }}>
+                <img
+                  src={q.image.url}
+                  alt={q.image.alt || 'Hotspot question image'}
+                  style={{ width: '100%', height: 'auto', display: 'block' }}
+                />
+                {(q.hotspots || []).map((hotspot) => {
+                  const isChosen = hotspotChoice === hotspot.id
+                  const isCorrect = hotspot.id === q.correct_hotspot_id
+                  const showCorrect = shouldRevealCorrect && isCorrect
+                  const showIncorrect = shouldRevealCorrect && isChosen && !isCorrect
+                  const borderColor = showCorrect ? '#0b7a2f' : showIncorrect ? '#c62828' : (isChosen ? '#0b5cff' : 'rgba(11, 92, 255, 0.55)')
+                  const background = isChosen ? 'rgba(11, 92, 255, 0.18)' : 'rgba(11, 92, 255, 0.08)'
+                  return (
+                    <button
+                      key={hotspot.id}
+                      type="button"
+                      onClick={() => {
+                        setHotspotChoice(hotspot.id)
+                        setSubmitted(false)
+                      }}
+                      aria-label={hotspot.label || `Hotspot ${hotspot.id}`}
+                      style={{
+                        position: 'absolute',
+                        left: `${hotspot.x * 100}%`,
+                        top: `${hotspot.y * 100}%`,
+                        width: `${hotspot.w * 100}%`,
+                        height: `${hotspot.h * 100}%`,
+                        border: `2px solid ${borderColor}`,
+                        background,
+                        cursor: 'pointer',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                  )
+                })}
+              </View>
+              <Text size="small" color="secondary">
+                Select one region on the image.
+              </Text>
+              {shouldRevealCorrect && (
+                <Text>
+                  {lastSubmissionCorrect ? statusTag('[Correct] ', 'green') : statusTag('[Incorrect] ', 'red')}
+                  Correct hotspot: {(q.hotspots || []).find((h) => h.id === q.correct_hotspot_id)?.label || q.correct_hotspot_id}
                 </Text>
               )}
             </Flex>

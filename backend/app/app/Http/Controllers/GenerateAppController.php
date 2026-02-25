@@ -20,6 +20,7 @@ class GenerateAppController extends Controller
     private const QUESTION_TYPE_FILL_IN_BLANK = 'fill_in_blank';
     private const QUESTION_TYPE_ORDERING = 'ordering';
     private const QUESTION_TYPE_NUMERIC = 'numeric';
+    private const QUESTION_TYPE_IMAGE_HOTSPOT_SINGLE = 'image_hotspot_single';
 
     private const STRUCTURED_TYPES = [
         self::QUESTION_TYPE_MC_SINGLE,
@@ -28,6 +29,7 @@ class GenerateAppController extends Controller
         self::QUESTION_TYPE_FILL_IN_BLANK,
         self::QUESTION_TYPE_ORDERING,
         self::QUESTION_TYPE_NUMERIC,
+        self::QUESTION_TYPE_IMAGE_HOTSPOT_SINGLE,
     ];
 
     private function callLLM(array $messages): array
@@ -161,7 +163,7 @@ class GenerateAppController extends Controller
         return $violations;
     }
 
-    private function buildStructuredSystemPrompt(string $questionType, ?array $existingStructured = null): string
+    private function buildStructuredSystemPrompt(string $questionType, ?array $existingStructured = null, array $availableAssets = []): string
     {
         $existingPart = '';
         $revisionRule = '- Create a new question set from scratch.';
@@ -170,6 +172,8 @@ class GenerateAppController extends Controller
             $existingPart = "CURRENT QUESTION SET:\n{$existingJson}\n\n";
             $revisionRule = '- Apply only requested changes and preserve all other fields unless explicitly changed.';
         }
+
+        $assetContext = $this->buildAvailableAssetsContext($availableAssets);
 
         $common = <<<TXT
 Return ONLY valid JSON with shape:
@@ -291,19 +295,46 @@ Constraints:
   A) target_value and tolerance (>=0), OR
   B) min_value and max_value with min_value <= max_value.
 TXT,
+            self::QUESTION_TYPE_IMAGE_HOTSPOT_SINGLE => <<<TXT
+Question schema:
+{
+  "id": string,
+  "question_type": "image_hotspot_single",
+  "prompt_html": string,
+  "image": {
+    "asset_id": string,
+    "url": string,
+    "alt": string,
+    "width": number,
+    "height": number
+  },
+  "hotspots": [
+    {"id": string, "x": number, "y": number, "w": number, "h": number, "label": string}
+  ],
+  "correct_hotspot_id": string,
+  "points_possible": number,
+  "shuffle_options": false,
+  "reveal_correct_after_two_incorrect_attempts": boolean
+}
+Constraints:
+- hotspots count: 1..12.
+- normalized geometry: x,y,w,h in [0..1], w/h > 0, and (x+w)<=1, (y+h)<=1.
+- correct_hotspot_id must match one hotspot id.
+TXT,
             default => ''
         };
 
-        return "You generate structured quiz data for a learning tool.\n\n{$existingPart}{$common}\n\n{$typeSchema}";
+        return "You generate structured quiz data for a learning tool.\n\n{$assetContext}\n{$existingPart}{$common}\n\n{$typeSchema}";
     }
 
     private function generateStructuredQuestionSet(
         string $prompt,
         float $confidence,
         string $questionType,
-        ?array $existingStructured = null
+        ?array $existingStructured = null,
+        array $availableAssets = []
     ): ?array {
-        $system = $this->buildStructuredSystemPrompt($questionType, $existingStructured);
+        $system = $this->buildStructuredSystemPrompt($questionType, $existingStructured, $availableAssets);
         $action = $existingStructured ? 'Revise the current question set according to this request:' : 'Create a question set according to this request:';
 
         $result = $this->callLLM([
@@ -355,6 +386,7 @@ TXT,
             self::QUESTION_TYPE_FILL_IN_BLANK => $this->normalizeQuestionFillInBlank($questions[0], $existingQuestion),
             self::QUESTION_TYPE_ORDERING => $this->normalizeQuestionOrdering($questions[0], $existingQuestion),
             self::QUESTION_TYPE_NUMERIC => $this->normalizeQuestionNumeric($questions[0], $existingQuestion),
+            self::QUESTION_TYPE_IMAGE_HOTSPOT_SINGLE => $this->normalizeQuestionImageHotspotSingle($questions[0], $existingQuestion),
             default => null,
         };
 
@@ -722,6 +754,136 @@ TXT,
         return $normalized;
     }
 
+    private function normalizeQuestionImageHotspotSingle(array $q, ?array $existingQuestion = null): ?array
+    {
+        $base = $this->normalizeQuestionBase($q, self::QUESTION_TYPE_IMAGE_HOTSPOT_SINGLE, $existingQuestion);
+        if (!$base) {
+            return null;
+        }
+
+        $image = $q['image'] ?? null;
+        if (!is_array($image)) {
+            return null;
+        }
+
+        $assetId = $image['asset_id'] ?? null;
+        $url = $image['url'] ?? null;
+        if (!is_string($assetId) || trim($assetId) === '' || !is_string($url) || trim($url) === '') {
+            return null;
+        }
+
+        $hotspots = $q['hotspots'] ?? null;
+        if (!is_array($hotspots) || count($hotspots) < 1 || count($hotspots) > 12) {
+            return null;
+        }
+
+        $normalizedHotspots = [];
+        $seenIds = [];
+        foreach ($hotspots as $idx => $hotspot) {
+            if (!is_array($hotspot)) {
+                return null;
+            }
+            $id = $hotspot['id'] ?? ('hs_' . ($idx + 1));
+            if (!is_string($id) || trim($id) === '' || isset($seenIds[$id])) {
+                return null;
+            }
+            if (!is_numeric($hotspot['x'] ?? null) || !is_numeric($hotspot['y'] ?? null) || !is_numeric($hotspot['w'] ?? null) || !is_numeric($hotspot['h'] ?? null)) {
+                return null;
+            }
+
+            $x = max(0.0, min(1.0, (float) $hotspot['x']));
+            $y = max(0.0, min(1.0, (float) $hotspot['y']));
+            $w = (float) $hotspot['w'];
+            $h = (float) $hotspot['h'];
+            if ($w <= 0 || $h <= 0 || ($x + $w) > 1.0 || ($y + $h) > 1.0) {
+                return null;
+            }
+
+            $normalizedHotspots[] = [
+                'id' => $id,
+                'x' => round($x, 6),
+                'y' => round($y, 6),
+                'w' => round($w, 6),
+                'h' => round($h, 6),
+                'label' => is_string($hotspot['label'] ?? null) ? trim($hotspot['label']) : '',
+            ];
+            $seenIds[$id] = true;
+        }
+
+        $correctId = $q['correct_hotspot_id'] ?? null;
+        if (!is_string($correctId) || !isset($seenIds[$correctId])) {
+            return null;
+        }
+
+        return array_merge($base, [
+            'image' => [
+                'asset_id' => $assetId,
+                'url' => trim($url),
+                'alt' => is_string($image['alt'] ?? null) ? trim($image['alt']) : '',
+                'width' => is_numeric($image['width'] ?? null) ? (int) $image['width'] : null,
+                'height' => is_numeric($image['height'] ?? null) ? (int) $image['height'] : null,
+            ],
+            'hotspots' => $normalizedHotspots,
+            'correct_hotspot_id' => $correctId,
+            'shuffle_options' => false,
+        ]);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function getAvailableImageAssets(?object $app): array
+    {
+        if (!$app || !isset($app->id)) {
+            return [];
+        }
+
+        return DB::table('app_assets')
+            ->where('app_id', (int) $app->id)
+            ->where('kind', 'image')
+            ->orderBy('created_at')
+            ->get()
+            ->map(function ($row) {
+                return [
+                    'asset_id' => (string) $row->id,
+                    'label' => (string) ($row->label ?? ''),
+                    'alt_text' => (string) ($row->alt_text ?? ''),
+                    'url' => (string) $row->url_optimized,
+                    'width' => (int) $row->width,
+                    'height' => (int) $row->height,
+                    'rights_basis' => (string) $row->rights_basis,
+                    'cc_license' => $row->cc_license ? (string) $row->cc_license : null,
+                    'copyright_holder' => $row->copyright_holder ? (string) $row->copyright_holder : null,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $assets
+     */
+    private function buildAvailableAssetsContext(array $assets): string
+    {
+        if ($assets === []) {
+            return "AVAILABLE_IMAGE_ASSETS:\n- none";
+        }
+
+        $json = json_encode($assets, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($json)) {
+            return "AVAILABLE_IMAGE_ASSETS:\n- none";
+        }
+
+        return <<<TXT
+AVAILABLE_IMAGE_ASSETS:
+{$json}
+
+Rules for assets:
+- Use only these asset URLs for generated image references.
+- For hotspot questions, set image.asset_id and image.url from this list.
+TXT;
+    }
+
     private function mapResourceLink(?int $appId, Request $request): void
     {
         if (!$appId) {
@@ -753,8 +915,9 @@ TXT,
         }
     }
 
-    private function generateOpenInteractionPackage(Request $request, ?object $existingApp): array
+    private function generateOpenInteractionPackage(Request $request, ?object $existingApp, array $availableAssets = []): array
     {
+        $assetContext = $this->buildAvailableAssetsContext($availableAssets);
         if ($existingApp) {
             $system = <<<SYS
 You are revising an existing learning application in a sandboxed iframe.
@@ -779,10 +942,13 @@ INSTRUCTIONS:
 - Follow all sandbox rules (no forms, fetch, external libs)
 - Mount into element with id="app"
 - Use window.sdk.getState(), setState(), notify() where appropriate
+- Prefer AVAILABLE_IMAGE_ASSETS URLs when rendering images
 SYS;
 
             $user = <<<USR
 User's revision request: {$request->prompt}
+
+{$assetContext}
 
 Return complete revised JSON only.
 USR;
@@ -804,10 +970,13 @@ Rules:
 - Treat buttons as JavaScript triggers, not HTML submit actions.
 - Mount into an element with id="app".
 - Use window.sdk.getState(), setState(), notify() where appropriate.
+- Prefer AVAILABLE_IMAGE_ASSETS URLs when rendering images.
 SYS;
 
             $user = <<<USR
 {$request->prompt}
+
+{$assetContext}
 
 Return JSON only.
 USR;
@@ -912,6 +1081,7 @@ MSG;
                 $existingStructured = $decoded;
             }
         }
+        $availableAssets = $this->getAvailableImageAssets($existingApp);
 
         if ($generationMode === self::KIND_STRUCTURED_QUESTION_SET) {
             if (!is_string($questionType) || !in_array($questionType, self::STRUCTURED_TYPES, true)) {
@@ -955,7 +1125,8 @@ MSG;
                 $request->prompt,
                 1.0,
                 $questionType,
-                $existingStructured
+                $existingStructured,
+                $availableAssets
             );
 
             if ($structured === null) {
@@ -1005,7 +1176,7 @@ MSG;
         }
 
         // open_interaction path
-        $openResult = $this->generateOpenInteractionPackage($request, $existingAppForLlm);
+        $openResult = $this->generateOpenInteractionPackage($request, $existingAppForLlm, $availableAssets);
         if (($openResult['status'] ?? 500) !== 200) {
             return response()->json($openResult, $openResult['status'] ?? 500);
         }
