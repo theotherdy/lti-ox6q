@@ -83,7 +83,7 @@ export default function StructuredRunnerFrame({ pkg }) {
         ref={iframeRef}
         title="Structured question"
         sandbox="allow-scripts"
-        src="/structured-runner.html"
+        src={`${import.meta.env.BASE_URL}structured-runner.html`}
         onLoad={postInit}
         style={{ width: '100%', height: `${iframeHeight}px`, border: 'none', borderRadius: 0, display: 'block' }}
       />
