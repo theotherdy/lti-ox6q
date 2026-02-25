@@ -72,6 +72,21 @@ function hasInstructorRole(roles) {
   })
 }
 
+function detectGeneratedFromPackage(pkg) {
+  if (!pkg || typeof pkg !== 'object') return false
+  if (pkg.lifecycle_status === 'inserted') return true
+  if (pkg.kind === 'structured_question_set') {
+    return Array.isArray(pkg.questions) && pkg.questions.length > 0
+  }
+  if (pkg.kind === 'open_interaction') {
+    const html = String(pkg.html ?? '').trim()
+    const css = String(pkg.css ?? '').trim()
+    const js = String(pkg.js ?? '').trim()
+    return css !== '' || js !== '' || (html !== '' && html !== "<div id='app'></div>")
+  }
+  return false
+}
+
 export default function App() {
   const urlParams = new URLSearchParams(window.location.search)
   const isLtiLaunch = urlParams.has('token')
@@ -125,6 +140,8 @@ export default function App() {
   const [generationMode, setGenerationMode] = useState(MODE_STRUCTURED)
   const [questionType, setQuestionType] = useState(DEFAULT_STRUCTURED_TYPE)
   const [showStartAgainConfirm, setShowStartAgainConfirm] = useState(false)
+  const [hasGeneratedApp, setHasGeneratedApp] = useState(false)
+  const [isImagePanelOpen, setIsImagePanelOpen] = useState(false)
   const [assets, setAssets] = useState([])
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [uploadingAsset, setUploadingAsset] = useState(false)
@@ -154,8 +171,7 @@ export default function App() {
   const canvasViewportHeightRef = useRef(null)
   const closeButtonContainerRef = useRef(null)
   const preEditHeightRef = useRef(null)
-  const startAgainRef = useRef(false)
-  const startAgainAppIdRef = useRef(null)
+  const creatingDraftRef = useRef(false)
   // Keep refs in sync on every render so effect closures always read current values
   isEditorFullScreenRef.current = isEditorFullScreen
   canvasViewportHeightRef.current = canvasViewportHeight
@@ -204,6 +220,7 @@ export default function App() {
   const deepLinkReturnUrl = lti?.deep_linking_settings?.deep_link_return_url || null
   const launchReturnUrl = lti?.launch_presentation?.return_url || null
   const targetLinkUri = lti?.target_link_uri || `${window.location.origin}${window.location.pathname}`
+  const canManageAssets = !isLtiLaunch || isInstructor
 
   const handleLtiJwt = useCallback(async (receivedToolSupportJwt, server) => {
     setToolSupportJwt(receivedToolSupportJwt)
@@ -330,12 +347,78 @@ export default function App() {
       setAppPackage(body)
       setSavedApp(body)
       setPreviousApp(null)
+      setHasGeneratedApp(detectGeneratedFromPackage(body))
+      setIsImagePanelOpen(false)
       if (!isLtiLaunch) {
         sessionStorage.setItem('lastAppId', String(body.id))
       }
       setErrorMessage(null)
     } catch (e) {
       setErrorMessage(`Load error: ${String(e)}`)
+    }
+  }
+
+  async function createDraftApp() {
+    if (!accessToken || creatingDraftRef.current || appPackage?.id) return
+    creatingDraftRef.current = true
+    try {
+      const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/draft`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ title: 'Draft activity' }),
+      })
+      if (res.status === 401) return
+      if (!res.ok) {
+        setErrorMessage(body.error || 'Failed to create draft app')
+        return
+      }
+      setAppPackage(body)
+      setSavedApp(body)
+      setPreviousApp(null)
+      setHasGeneratedApp(false)
+      setIsImagePanelOpen(false)
+      if (!isLtiLaunch) {
+        sessionStorage.setItem('lastAppId', String(body.id))
+      }
+      setErrorMessage(null)
+    } catch (e) {
+      setErrorMessage(`Draft creation error: ${String(e)}`)
+    } finally {
+      creatingDraftRef.current = false
+    }
+  }
+
+  async function deleteDraftIfApplicable(pkg = appPackage) {
+    if (!pkg?.id) return true
+    if (pkg.lifecycle_status !== 'draft_uninserted') return true
+
+    const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${pkg.id}/draft`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+    if (res.status === 401) return false
+    if (!res.ok) {
+      setErrorMessage(body.error || 'Failed to delete draft')
+      return false
+    }
+    return true
+  }
+
+  async function markCurrentAppInserted() {
+    if (!appPackage?.id) return
+    const { res } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appPackage.id}/mark-inserted`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+    if (res.status === 401) return
+    if (res.ok) {
+      setAppPackage((prev) => (prev ? { ...prev, lifecycle_status: 'inserted', inserted_at: new Date().toISOString() } : prev))
     }
   }
 
@@ -366,9 +449,6 @@ export default function App() {
         requestBody.preview = true
         requestBody.convert_mode = appPackage.kind !== generationMode ||
           (generationMode === MODE_STRUCTURED && appPackage?.questions?.[0]?.question_type !== questionType)
-      } else if (startAgainRef.current && startAgainAppIdRef.current) {
-        requestBody.app_id = startAgainAppIdRef.current
-        requestBody.start_fresh = true
       }
 
       const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/generate`, {
@@ -389,12 +469,12 @@ export default function App() {
       if (isRevising) {
         setPreviousApp(appPackage)
         setAppPackage(body)
+        setHasGeneratedApp(true)
       } else {
-        startAgainRef.current = false
-        startAgainAppIdRef.current = null
         setAppPackage(body)
         setSavedApp(body)
         setPreviousApp(null)
+        setHasGeneratedApp(true)
         if (body.id && !isLtiLaunch) {
           sessionStorage.setItem('lastAppId', String(body.id))
         }
@@ -465,7 +545,7 @@ export default function App() {
   }
 
   async function loadAssets(appId = appPackage?.id) {
-    if (!appId || !accessToken || !isInstructor) {
+    if (!appId || !accessToken || !canManageAssets) {
       setAssets([])
       return
     }
@@ -529,6 +609,7 @@ export default function App() {
       setAssetCcLicense('')
       setAssetCopyrightHolder('')
       setAssetRightsNote('')
+      setIsImagePanelOpen(false)
       setErrorMessage(null)
       await loadAssets(appPackage.id)
     } catch (e) {
@@ -572,6 +653,7 @@ export default function App() {
 
   function cancelEditSession() {
     setAppPackage(savedApp)
+    setHasGeneratedApp(detectGeneratedFromPackage(savedApp))
     setSavedApp(null)
     setPreviousApp(null)
     closeEditModal()
@@ -595,14 +677,22 @@ export default function App() {
     })
   }
 
-  function startAgain() {
-    startAgainRef.current = true
-    startAgainAppIdRef.current = appPackage?.id ?? null
+  async function startAgain() {
+    if (appPackage?.id) {
+      const deleted = await deleteDraftIfApplicable(appPackage)
+      if (!deleted) return
+    }
     setAppPackage(null)
     setPrompt('')
     setPreviousApp(null)
     setSavedApp(null)
+    setHasGeneratedApp(false)
+    setAssets([])
+    setIsImagePanelOpen(false)
     setShowStartAgainConfirm(false)
+    if (!isLtiLaunch) {
+      sessionStorage.removeItem('lastAppId')
+    }
   }
 
   async function clearApp() {
@@ -611,6 +701,11 @@ export default function App() {
     setErrorMessage(null)
 
     try {
+      if (appPackage?.id) {
+        const deleted = await deleteDraftIfApplicable(appPackage)
+        if (!deleted) return
+      }
+
       const tokenLti = parseJwt(accessToken)?.lti
       const launchLti = bootstrapInfo?.lti || tokenLti
       const hasMapping = Boolean(launchLti?.issuer && launchLti?.deployment_id && launchLti?.resource_link_id)
@@ -632,7 +727,9 @@ export default function App() {
       setPrompt('')
       setPreviousApp(null)
       setSavedApp(null)
+      setHasGeneratedApp(false)
       setShowStartAgainConfirm(false)
+      setIsImagePanelOpen(false)
       if (!isLtiLaunch) {
         sessionStorage.removeItem('lastAppId')
       }
@@ -706,6 +803,7 @@ export default function App() {
         throw new Error('Deep-link signing response did not include jwt.')
       }
 
+      await markCurrentAppInserted()
       setDeepLinkingJwt(payload.jwt)
     } catch (e) {
       setErrorMessage(`Insert failed: ${String(e.message || e)}`)
@@ -798,7 +896,6 @@ export default function App() {
   useEffect(() => {
     if (!accessToken) return
     if (appPackage) return
-    if (startAgainRef.current) return
 
     const mappedAppId = bootstrapInfo?.app_id
     if (mappedAppId) {
@@ -806,12 +903,20 @@ export default function App() {
       return
     }
 
-    if (isLtiLaunch) return
+    if (!isLtiLaunch) {
+      const lastAppId = sessionStorage.getItem('lastAppId')
+      if (lastAppId) {
+        loadAppById(lastAppId)
+        return
+      }
+      createDraftApp()
+      return
+    }
 
-    const lastAppId = sessionStorage.getItem('lastAppId')
-    if (!lastAppId) return
-    loadAppById(lastAppId)
-  }, [accessToken, appPackage, bootstrapInfo, isLtiLaunch])
+    if (isInstructor) {
+      createDraftApp()
+    }
+  }, [accessToken, appPackage, bootstrapInfo, isLtiLaunch, isInstructor])
 
   useEffect(() => {
     if (!appPackage?.id || !accessToken || !isInstructor) {
@@ -819,7 +924,7 @@ export default function App() {
       return
     }
     loadAssets(appPackage.id)
-  }, [appPackage?.id, accessToken, isInstructor])
+  }, [appPackage?.id, accessToken, canManageAssets])
 
   useEffect(() => {
     if (!appPackage) {
@@ -1160,113 +1265,127 @@ export default function App() {
                 </View>
               )}
 
-              {isEditMode && isInstructor && appPackage?.id && (
+              {canManageAssets && appPackage?.id && (
                 <View as="div" margin="0 0 medium 0" padding="small" borderWidth="small" borderRadius="medium">
                   <Flex direction="column" gap="small">
-                    <Text size="small" weight="bold">Images (app-scoped)</Text>
-                    <Text size="x-small" color="secondary">
-                      Copyright declaration is required before upload and cannot be edited later. To change rights metadata, delete and re-upload.
-                    </Text>
-
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                      <Text size="small">Image file</Text>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
-                        onChange={(e) => setAssetFile(e.target.files?.[0] || null)}
-                        disabled={uploadingAsset}
-                      />
-                    </label>
-
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                      <Text size="small">Copyright basis (required)</Text>
-                      <select
-                        value={assetRightsBasis}
-                        onChange={(e) => {
-                          const next = e.target.value
-                          setAssetRightsBasis(next)
-                          if (next !== 'creative_commons') setAssetCcLicense('')
-                        }}
-                        disabled={uploadingAsset}
-                      >
-                        <option value="">Select basis</option>
-                        {RIGHTS_BASIS_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                    </label>
-
-                    {assetRightsBasis === 'creative_commons' && (
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                        <Text size="small">Creative Commons type (required)</Text>
-                        <select
-                          value={assetCcLicense}
-                          onChange={(e) => setAssetCcLicense(e.target.value)}
-                          disabled={uploadingAsset}
-                        >
-                          <option value="">Select CC type</option>
-                          {CC_LICENSE_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>{option.label}</option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                      <Text size="small">Copyright holder (optional)</Text>
-                      <input
-                        type="text"
-                        value={assetCopyrightHolder}
-                        onChange={(e) => setAssetCopyrightHolder(e.target.value)}
-                        disabled={uploadingAsset}
-                      />
-                    </label>
-
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                      <Text size="small">Label (optional)</Text>
-                      <input
-                        type="text"
-                        value={assetLabel}
-                        onChange={(e) => setAssetLabel(e.target.value)}
-                        disabled={uploadingAsset}
-                      />
-                    </label>
-
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                      <Text size="small">Alt text (optional)</Text>
-                      <input
-                        type="text"
-                        value={assetAlt}
-                        onChange={(e) => setAssetAlt(e.target.value)}
-                        disabled={uploadingAsset}
-                      />
-                    </label>
-
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                      <Text size="small">Rights note (optional)</Text>
-                      <textarea
-                        value={assetRightsNote}
-                        onChange={(e) => setAssetRightsNote(e.target.value)}
-                        rows={2}
-                        disabled={uploadingAsset}
-                      />
-                    </label>
-
-                    <Flex gap="small" alignItems="center">
-                      <Button
-                        onClick={uploadAssetImage}
-                        color="primary"
-                        disabled={!assetFile || !assetRightsBasis || uploadingAsset || (assetRightsBasis === 'creative_commons' && !assetCcLicense)}
-                      >
-                        {uploadingAsset ? 'Uploading…' : 'Upload image'}
-                      </Button>
-                      <Button onClick={() => loadAssets()} disabled={assetsLoading || uploadingAsset}>
-                        Refresh list
-                      </Button>
+                    <Flex justifyItems="space-between" alignItems="center">
+                      <Text size="small" weight="bold">Images (app-scoped)</Text>
+                      <Flex gap="x-small">
+                        <Button size="small" onClick={() => setIsImagePanelOpen((open) => !open)}>
+                          {isImagePanelOpen ? 'Close image panel' : '+ Image'}
+                        </Button>
+                        <Button size="small" onClick={() => loadAssets()} disabled={assetsLoading || uploadingAsset}>
+                          Refresh
+                        </Button>
+                      </Flex>
                     </Flex>
 
+                    {isImagePanelOpen && (
+                      <View as="div" padding="x-small" borderWidth="small" borderRadius="small">
+                        <Flex direction="column" gap="small">
+                          <Text size="x-small" color="secondary">
+                            Copyright declaration is required before upload and cannot be edited later. To change rights metadata, delete and re-upload.
+                          </Text>
+
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <Text size="small">Image file</Text>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              onChange={(e) => setAssetFile(e.target.files?.[0] || null)}
+                              disabled={uploadingAsset}
+                            />
+                          </label>
+
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <Text size="small">Copyright basis (required)</Text>
+                            <select
+                              value={assetRightsBasis}
+                              onChange={(e) => {
+                                const next = e.target.value
+                                setAssetRightsBasis(next)
+                                if (next !== 'creative_commons') setAssetCcLicense('')
+                              }}
+                              disabled={uploadingAsset}
+                            >
+                              <option value="">Select basis</option>
+                              {RIGHTS_BASIS_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                            </select>
+                          </label>
+
+                          {assetRightsBasis === 'creative_commons' && (
+                            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                              <Text size="small">Creative Commons type (required)</Text>
+                              <select
+                                value={assetCcLicense}
+                                onChange={(e) => setAssetCcLicense(e.target.value)}
+                                disabled={uploadingAsset}
+                              >
+                                <option value="">Select CC type</option>
+                                {CC_LICENSE_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
+
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <Text size="small">Copyright holder (optional)</Text>
+                            <input
+                              type="text"
+                              value={assetCopyrightHolder}
+                              onChange={(e) => setAssetCopyrightHolder(e.target.value)}
+                              disabled={uploadingAsset}
+                            />
+                          </label>
+
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <Text size="small">Label (optional)</Text>
+                            <input
+                              type="text"
+                              value={assetLabel}
+                              onChange={(e) => setAssetLabel(e.target.value)}
+                              disabled={uploadingAsset}
+                            />
+                          </label>
+
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <Text size="small">Alt text (optional)</Text>
+                            <input
+                              type="text"
+                              value={assetAlt}
+                              onChange={(e) => setAssetAlt(e.target.value)}
+                              disabled={uploadingAsset}
+                            />
+                          </label>
+
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <Text size="small">Rights note (optional)</Text>
+                            <textarea
+                              value={assetRightsNote}
+                              onChange={(e) => setAssetRightsNote(e.target.value)}
+                              rows={2}
+                              disabled={uploadingAsset}
+                            />
+                          </label>
+
+                          <Flex gap="small" alignItems="center">
+                            <Button
+                              onClick={uploadAssetImage}
+                              color="primary"
+                              disabled={!assetFile || !assetRightsBasis || uploadingAsset || (assetRightsBasis === 'creative_commons' && !assetCcLicense)}
+                            >
+                              {uploadingAsset ? 'Uploading…' : 'Upload image'}
+                            </Button>
+                          </Flex>
+                        </Flex>
+                      </View>
+                    )}
+
                     <View as="div">
-                      <Text size="small" weight="bold">Current app images</Text>
+                      <Text size="small" weight="bold">Uploaded images</Text>
                       {assetsLoading ? (
                         <Text size="small" color="secondary">Loading…</Text>
                       ) : assets.length === 0 ? (
@@ -1276,23 +1395,19 @@ export default function App() {
                           {assets.map((asset) => (
                             <View key={asset.id} as="div" borderWidth="small" borderRadius="small" padding="x-small">
                               <Flex direction="column" gap="xx-small">
-                                <Text size="small"><strong>{asset.label || asset.id}</strong></Text>
-                                <Text size="x-small" color="secondary">
-                                  {asset.width}x{asset.height} · {(asset.bytes / 1024).toFixed(1)} KB · {asset.rights_basis}{asset.cc_license ? ` (${asset.cc_license})` : ''}
-                                </Text>
-                                {asset.copyright_holder ? (
-                                  <Text size="x-small" color="secondary">Copyright holder: {asset.copyright_holder}</Text>
-                                ) : null}
-                                <Text size="x-small" color="secondary" style={{ wordBreak: 'break-all' }}>{asset.url}</Text>
-                                <Flex gap="x-small">
+                                <Flex justifyItems="space-between" alignItems="start">
+                                  <Text size="small"><strong>{asset.label || asset.id}</strong></Text>
                                   <Button
                                     size="small"
                                     onClick={() => deleteAssetImage(asset.id)}
                                     disabled={deletingAssetId === asset.id}
                                   >
-                                    {deletingAssetId === asset.id ? 'Deleting…' : 'Delete'}
+                                    {deletingAssetId === asset.id ? '...' : 'X'}
                                   </Button>
                                 </Flex>
+                                <Text size="x-small" color="secondary">
+                                  {asset.width}x{asset.height} · {(asset.bytes / 1024).toFixed(1)} KB · {asset.rights_basis}{asset.cc_license ? ` (${asset.cc_license})` : ''}
+                                </Text>
                               </Flex>
                             </View>
                           ))}
@@ -1306,7 +1421,7 @@ export default function App() {
               <TextArea
                 label={<ScreenReaderContent>App description</ScreenReaderContent>}
                 placeholder={
-                  appPackage
+                  hasGeneratedApp
                     ? 'What changes would you like to make?…'
                     : 'Describe the learning activity you want…'
                 }
@@ -1337,8 +1452,8 @@ export default function App() {
                   disabled={generating || !prompt.trim() || !accessToken || (generationMode === MODE_STRUCTURED && !questionType)}
                 >
                   {generating
-                    ? (appPackage ? 'Revising…' : 'Generating…')
-                    : (appPackage ? 'Revise app' : 'Generate app')
+                    ? (hasGeneratedApp ? 'Revising…' : 'Generating…')
+                    : (hasGeneratedApp ? 'Revise app' : 'Generate app')
                   }
                 </Button>
               </Flex>

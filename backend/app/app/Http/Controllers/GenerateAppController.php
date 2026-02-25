@@ -912,6 +912,12 @@ TXT;
                     'updated_at' => $now,
                 ]
             );
+
+            DB::table('apps')->where('id', $appId)->update([
+                'lifecycle_status' => 'inserted',
+                'inserted_at' => $now,
+                'updated_at' => $now,
+            ]);
         }
     }
 
@@ -1157,6 +1163,8 @@ MSG;
                         'css' => null,
                         'js' => null,
                         'structured_json' => json_encode($structured),
+                        'lifecycle_status' => 'draft_uninserted',
+                        'inserted_at' => null,
                         'created_at' => now(),
                         'updated_at' => now(),
                     ]);
@@ -1164,6 +1172,7 @@ MSG;
             }
 
             $this->mapResourceLink($appId, $request);
+            $appRow = $appId ? DB::table('apps')->where('id', $appId)->first() : null;
 
             return response()->json([
                 'kind' => self::KIND_STRUCTURED_QUESTION_SET,
@@ -1172,6 +1181,8 @@ MSG;
                 'title' => $structured['title'],
                 'questions' => $structured['questions'],
                 'meta' => $structured['meta'],
+                'lifecycle_status' => (string) ($appRow->lifecycle_status ?? 'inserted'),
+                'inserted_at' => $appRow->inserted_at ?? null,
             ]);
         }
 
@@ -1204,6 +1215,8 @@ MSG;
                     'css' => $package['css'] ?? '',
                     'js' => $package['js'] ?? '',
                     'structured_json' => null,
+                    'lifecycle_status' => 'draft_uninserted',
+                    'inserted_at' => null,
                     'created_at' => now(),
                     'updated_at' => now(),
                 ]);
@@ -1211,6 +1224,7 @@ MSG;
         }
 
         $this->mapResourceLink($appId, $request);
+        $appRow = $appId ? DB::table('apps')->where('id', $appId)->first() : null;
 
         $response = [
             'kind' => self::KIND_OPEN_INTERACTION,
@@ -1219,6 +1233,8 @@ MSG;
             'html' => $package['html'] ?? "<div id='app'></div>",
             'css' => $package['css'] ?? '',
             'js' => $package['js'] ?? '',
+            'lifecycle_status' => (string) ($appRow->lifecycle_status ?? 'inserted'),
+            'inserted_at' => $appRow->inserted_at ?? null,
         ];
 
         if (!empty($openResult['did_auto_retry'])) {

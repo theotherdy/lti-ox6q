@@ -21,6 +21,9 @@ Route::post('/auth/bootstrap', [AuthBootstrapController::class, 'bootstrap']);
 Route::post('/auth/refresh', [AuthRefreshController::class, 'refresh']);
 
 Route::middleware([LocalJwtAuth::class])->group(function () {
+    Route::post('/apps/draft', [AppController::class, 'createDraft']);
+    Route::delete('/apps/{appId}/draft', [AppController::class, 'deleteDraft'])->whereNumber('appId');
+    Route::post('/apps/{appId}/mark-inserted', [AppController::class, 'markInserted'])->whereNumber('appId');
     Route::get('/apps/{appId}/package', [AppController::class, 'package'])->whereNumber('appId');
     Route::get('/apps/{appId}/assets', [AppAssetController::class, 'index'])->whereNumber('appId');
     Route::post('/apps/{appId}/assets/image', [AppAssetController::class, 'uploadImage'])->whereNumber('appId');

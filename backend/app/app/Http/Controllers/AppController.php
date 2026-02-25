@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use App\Services\StructuredHtmlSanitizer;
 
 class AppController extends Controller
@@ -18,6 +19,38 @@ class AppController extends Controller
         'numeric',
         'image_hotspot_single',
     ];
+
+    public function createDraft(Request $request)
+    {
+        $title = trim((string) $request->input('title', 'Draft activity'));
+        if ($title === '') {
+            $title = 'Draft activity';
+        }
+
+        $appId = DB::table('apps')->insertGetId([
+            'title' => $title,
+            'kind' => 'open_interaction',
+            'html' => "<div id='app'></div>",
+            'css' => '',
+            'js' => '',
+            'structured_json' => null,
+            'lifecycle_status' => 'draft_uninserted',
+            'inserted_at' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return response()->json([
+            'kind' => 'open_interaction',
+            'id' => $appId,
+            'title' => $title,
+            'html' => "<div id='app'></div>",
+            'css' => '',
+            'js' => '',
+            'lifecycle_status' => 'draft_uninserted',
+            'inserted_at' => null,
+        ], 201);
+    }
 
     public function package(Request $request, $appId)
     {
@@ -47,6 +80,8 @@ class AppController extends Controller
                 'title' => $structured['title'] ?? $row->title,
                 'questions' => $structured['questions'] ?? [],
                 'meta' => $structured['meta'] ?? [],
+                'lifecycle_status' => (string) ($row->lifecycle_status ?? 'inserted'),
+                'inserted_at' => $row->inserted_at,
             ]);
         }
 
@@ -57,7 +92,53 @@ class AppController extends Controller
             'html' => $row->html,
             'css' => $row->css,
             'js' => $row->js,
+            'lifecycle_status' => (string) ($row->lifecycle_status ?? 'inserted'),
+            'inserted_at' => $row->inserted_at,
         ]);
+    }
+
+    public function deleteDraft(Request $request, $appId)
+    {
+        if (!ctype_digit((string) $appId)) {
+            return response()->json(['error' => 'Invalid appId (must be numeric).'], 400);
+        }
+        $appId = (int) $appId;
+
+        $app = DB::table('apps')->where('id', $appId)->first();
+        if (!$app) {
+            return response()->json(['error' => 'App not found'], 404);
+        }
+
+        $status = (string) ($app->lifecycle_status ?? 'inserted');
+        if ($status !== 'draft_uninserted') {
+            return response()->json(['error' => 'Only uninserted drafts can be deleted via this endpoint.'], 422);
+        }
+
+        $this->deleteAppAssetFiles($appId);
+        DB::table('apps')->where('id', $appId)->delete();
+
+        return response()->json(['success' => true, 'deleted_app_id' => $appId]);
+    }
+
+    public function markInserted(Request $request, $appId)
+    {
+        if (!ctype_digit((string) $appId)) {
+            return response()->json(['error' => 'Invalid appId (must be numeric).'], 400);
+        }
+        $appId = (int) $appId;
+
+        $app = DB::table('apps')->where('id', $appId)->first();
+        if (!$app) {
+            return response()->json(['error' => 'App not found'], 404);
+        }
+
+        DB::table('apps')->where('id', $appId)->update([
+            'lifecycle_status' => 'inserted',
+            'inserted_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return response()->json(['success' => true, 'id' => $appId, 'lifecycle_status' => 'inserted']);
     }
 
     public function getState(Request $request, $appId)
@@ -627,6 +708,21 @@ class AppController extends Controller
                     ->orWhereNull('is_instructor');
             })
             ->delete();
+    }
+
+    private function deleteAppAssetFiles(int $appId): void
+    {
+        $assets = DB::table('app_assets')->where('app_id', $appId)->get();
+        foreach ($assets as $asset) {
+            $disk = (string) ($asset->disk ?? config('media.disk', 'public'));
+            $paths = array_values(array_unique(array_filter([
+                $asset->path_optimized ?? null,
+                $asset->path_original ?? null,
+            ])));
+            foreach ($paths as $path) {
+                Storage::disk($disk)->delete((string) $path);
+            }
+        }
     }
 
     private function sanitizeStructuredPayload(array $structured): array
