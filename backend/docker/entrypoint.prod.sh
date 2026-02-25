@@ -44,6 +44,10 @@ set_env SESSION_DRIVER file
 set_env QUEUE_CONNECTION sync
 
 # Local JWT
+if [ -z "${LOCAL_JWT_SECRET:-}" ] || [ "${#LOCAL_JWT_SECRET}" -lt 32 ]; then
+  echo "[backend] ERROR: LOCAL_JWT_SECRET must be set and at least 32 characters long for HS256."
+  exit 1
+fi
 set_env LOCAL_JWT_SECRET "${LOCAL_JWT_SECRET}"
 set_env LOCAL_JWT_EXPIRES_IN "${LOCAL_JWT_EXPIRES_IN:-1800}"
 

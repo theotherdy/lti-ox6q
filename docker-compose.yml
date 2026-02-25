@@ -26,6 +26,7 @@ services:
       DB_DATABASE: lti_ox6q
       DB_USERNAME: lti_user
       DB_PASSWORD: secret
+      LOCAL_JWT_SECRET: "dev-local-jwt-secret-32-bytes-minimum-1234567890"
       TOOLSUPPORT_JWKS_URL: "https://tools-dev.canvas.ox.ac.uk/.well-known/jwks.json"
       TOOLSUPPORT_JWT_ISS: "https://lti-dev.canvas.ox.ac.uk"
       TOOLSUPPORT_JWT_AUD: "193670000000000568"

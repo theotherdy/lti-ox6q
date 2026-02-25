@@ -43,7 +43,16 @@ set_env APP_URL "${APP_URL}"
 set_env FRONTEND_ORIGIN "${FRONTEND_ORIGIN}"
 
 # Local API token secret
-: "${LOCAL_JWT_SECRET:=change-me}"
+: "${LOCAL_JWT_SECRET:=}"
+if [ -z "${LOCAL_JWT_SECRET}" ] || [ "${#LOCAL_JWT_SECRET}" -lt 32 ]; then
+  # php-jwt requires HS256 keys to be at least 256 bits (32 bytes)
+  if command -v openssl >/dev/null 2>&1; then
+    LOCAL_JWT_SECRET="$(openssl rand -hex 32)"
+  else
+    LOCAL_JWT_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  fi
+  echo "[backend] Generated LOCAL_JWT_SECRET because provided value was missing/too short."
+fi
 set_env LOCAL_JWT_SECRET "${LOCAL_JWT_SECRET}"
 
 # Tool Support JWT verification — only write to .env if explicitly provided
