@@ -353,7 +353,7 @@ export default function App() {
         return
       }
       if (!res.ok) {
-        setErrorMessage(body.error || (isRevising ? 'Revision failed' : 'Generation failed'))
+        setErrorMessage(isRevising ? 'Revision failed — please try again.' : 'Generation failed — please try again.')
         return
       }
 
@@ -372,7 +372,7 @@ export default function App() {
       }
       setPrompt('')
     } catch (e) {
-      setErrorMessage(String(e))
+      setErrorMessage(isRevising ? 'Revision failed — please try again.' : 'Generation failed — please try again.')
     } finally {
       if (timerRef.current) {
         clearInterval(timerRef.current)
