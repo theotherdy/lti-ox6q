@@ -7,12 +7,17 @@ import { View } from '@instructure/ui-view'
 import { Flex } from '@instructure/ui-flex'
 import { Button, IconButton } from '@instructure/ui-buttons'
 import { TextArea } from '@instructure/ui-text-area'
+import { TextInput } from '@instructure/ui-text-input'
 import { Alert } from '@instructure/ui-alerts'
 import { DrawerLayout } from '@instructure/ui-drawer-layout'
 import { Heading } from '@instructure/ui-heading'
 import { Text } from '@instructure/ui-text'
 import { Spinner } from '@instructure/ui-spinner'
-import { IconHamburgerLine, IconXLine, IconFullScreenLine, IconExitFullScreenLine } from '@instructure/ui-icons'
+import { ToggleDetails } from '@instructure/ui-toggle-details'
+import { RadioInputGroup, RadioInput } from '@instructure/ui-radio-input'
+import { SimpleSelect } from '@instructure/ui-simple-select'
+import { Checkbox } from '@instructure/ui-checkbox'
+import { IconHamburgerLine, IconXLine, IconFullScreenLine, IconExitFullScreenLine, IconRefreshLine } from '@instructure/ui-icons'
 import { ScreenReaderContent } from '@instructure/ui-a11y-content'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -23,6 +28,9 @@ const DEEP_LINK_IFRAME_WIDTH = 1000
 const DEEP_LINK_IFRAME_HEIGHT = 520
 const DEEP_LINK_PREVIEW_MIN_HEIGHT = 560
 const EDITOR_COMPACT_HEIGHT = 600
+const VISION_MODE_AUTO = 'auto'
+const VISION_MODE_FORCE = 'force'
+const VISION_MODE_OFF = 'off'
 
 const RIGHTS_BASIS_OPTIONS = [
   { value: 'copyright_holder', label: 'I hold the copyright' },
@@ -139,6 +147,7 @@ export default function App() {
   const [isTrayOpen, setIsTrayOpen] = useState(true)
   const [generationMode, setGenerationMode] = useState(MODE_STRUCTURED)
   const [questionType, setQuestionType] = useState(DEFAULT_STRUCTURED_TYPE)
+  const [visionMode, setVisionMode] = useState(VISION_MODE_AUTO)
   const [showStartAgainConfirm, setShowStartAgainConfirm] = useState(false)
   const [hasGeneratedApp, setHasGeneratedApp] = useState(false)
   const [isImagePanelOpen, setIsImagePanelOpen] = useState(false)
@@ -146,6 +155,7 @@ export default function App() {
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [uploadingAsset, setUploadingAsset] = useState(false)
   const [deletingAssetId, setDeletingAssetId] = useState(null)
+  const [pendingAssetDeletes, setPendingAssetDeletes] = useState([])
   const [assetLabel, setAssetLabel] = useState('')
   const [assetAlt, setAssetAlt] = useState('')
   const [assetRightsBasis, setAssetRightsBasis] = useState('')
@@ -153,6 +163,7 @@ export default function App() {
   const [assetCopyrightHolder, setAssetCopyrightHolder] = useState('')
   const [assetRightsNote, setAssetRightsNote] = useState('')
   const [assetFile, setAssetFile] = useState(null)
+  const [showAdvancedControls, setShowAdvancedControls] = useState(false)
 
   const [deepLinkingJwt, setDeepLinkingJwt] = useState('')
   const [insertingDeepLink, setInsertingDeepLink] = useState(false)
@@ -348,6 +359,7 @@ export default function App() {
       setSavedApp(body)
       setPreviousApp(null)
       setHasGeneratedApp(detectGeneratedFromPackage(body))
+      setPendingAssetDeletes([])
       setIsImagePanelOpen(false)
       if (!isLtiLaunch) {
         sessionStorage.setItem('lastAppId', String(body.id))
@@ -378,6 +390,7 @@ export default function App() {
       setSavedApp(body)
       setPreviousApp(null)
       setHasGeneratedApp(false)
+      setPendingAssetDeletes([])
       setIsImagePanelOpen(false)
       if (!isLtiLaunch) {
         sessionStorage.setItem('lastAppId', String(body.id))
@@ -425,7 +438,14 @@ export default function App() {
   async function generateApp() {
     if (!prompt.trim() || !accessToken) return
 
-    const isRevising = Boolean(appPackage?.id)
+    const hasAppId = Boolean(appPackage?.id)
+    const isRevising = Boolean(hasGeneratedApp && hasAppId)
+
+    if (generationMode === MODE_STRUCTURED && questionType === 'image_hotspot_single' && assets.length < 1) {
+      setErrorMessage('Upload at least one image before generating an image hotspot question.')
+      return
+    }
+
     setGenerating(true)
     setElapsedTime(0)
     setErrorMessage(null)
@@ -438,17 +458,19 @@ export default function App() {
       const requestBody = {
         prompt,
         generation_mode: generationMode,
+        vision_mode: visionMode,
       }
 
       if (generationMode === MODE_STRUCTURED) {
         requestBody.question_type = questionType
       }
 
-      if (isRevising) {
+      if (hasAppId) {
         requestBody.app_id = appPackage.id
+      }
+
+      if (isRevising) {
         requestBody.preview = true
-        requestBody.convert_mode = appPackage.kind !== generationMode ||
-          (generationMode === MODE_STRUCTURED && appPackage?.questions?.[0]?.question_type !== questionType)
       }
 
       const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/generate`, {
@@ -462,7 +484,7 @@ export default function App() {
         return
       }
       if (!res.ok) {
-        setErrorMessage(isRevising ? 'Revision failed — please try again.' : 'Generation failed — please try again.')
+        setErrorMessage(body?.error || (isRevising ? 'Revision failed — please try again.' : 'Generation failed — please try again.'))
         return
       }
 
@@ -475,6 +497,7 @@ export default function App() {
         setSavedApp(body)
         setPreviousApp(null)
         setHasGeneratedApp(true)
+        setPendingAssetDeletes([])
         if (body.id && !isLtiLaunch) {
           sessionStorage.setItem('lastAppId', String(body.id))
         }
@@ -529,10 +552,33 @@ export default function App() {
         return false
       }
 
+      if (appPackage?.id && pendingAssetDeletes.length > 0) {
+        const deleteIds = Array.from(new Set(pendingAssetDeletes))
+        let failedDeletes = 0
+        for (const assetId of deleteIds) {
+          const del = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appPackage.id}/assets/${assetId}`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          })
+          if (!del.res.ok && del.res.status !== 401 && del.res.status !== 404) {
+            failedDeletes += 1
+          }
+        }
+        setPendingAssetDeletes([])
+        await loadAssets(appPackage.id)
+        if (failedDeletes > 0) {
+          setErrorMessage(`Saved revision, but ${failedDeletes} image delete request(s) failed.`)
+        }
+      }
+
       setSavedApp(appPackage)
       setPreviousApp(null)
       setResetNonInstructorStateOnSave(false)
-      setErrorMessage(null)
+      if (pendingAssetDeletes.length === 0) {
+        setErrorMessage(null)
+      }
 
       if (editorOpen) {
         closeEditModal()
@@ -619,8 +665,14 @@ export default function App() {
     }
   }
 
-  async function deleteAssetImage(assetId) {
+  async function deleteAssetImage(assetId, stageOnly = false) {
     if (!appPackage?.id || !assetId) return
+    if (stageOnly) {
+      setAssets((xs) => xs.filter((x) => x.id !== assetId))
+      setPendingAssetDeletes((ids) => (ids.includes(assetId) ? ids : [...ids, assetId]))
+      setErrorMessage(null)
+      return
+    }
     setDeletingAssetId(assetId)
     try {
       const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/${appPackage.id}/assets/${assetId}`, {
@@ -651,12 +703,17 @@ export default function App() {
     setPreviousApp(null)
   }
 
-  function cancelEditSession() {
+  async function cancelEditSession() {
+    const restoreAppId = savedApp?.id || appPackage?.id || null
     setAppPackage(savedApp)
     setHasGeneratedApp(detectGeneratedFromPackage(savedApp))
     setSavedApp(null)
     setPreviousApp(null)
+    setPendingAssetDeletes([])
     closeEditModal()
+    if (restoreAppId) {
+      await loadAssets(restoreAppId)
+    }
   }
 
   function updateStructuredRevealSetting(enabled) {
@@ -687,6 +744,7 @@ export default function App() {
     setPreviousApp(null)
     setSavedApp(null)
     setHasGeneratedApp(false)
+    setPendingAssetDeletes([])
     setAssets([])
     setIsImagePanelOpen(false)
     setShowStartAgainConfirm(false)
@@ -728,6 +786,7 @@ export default function App() {
       setPreviousApp(null)
       setSavedApp(null)
       setHasGeneratedApp(false)
+      setPendingAssetDeletes([])
       setShowStartAgainConfirm(false)
       setIsImagePanelOpen(false)
       if (!isLtiLaunch) {
@@ -919,7 +978,7 @@ export default function App() {
   }, [accessToken, appPackage, bootstrapInfo, isLtiLaunch, isInstructor])
 
   useEffect(() => {
-    if (!appPackage?.id || !accessToken || !isInstructor) {
+    if (!appPackage?.id || !accessToken || !canManageAssets) {
       setAssets([])
       return
     }
@@ -927,7 +986,7 @@ export default function App() {
   }, [appPackage?.id, accessToken, canManageAssets])
 
   useEffect(() => {
-    if (!appPackage) {
+    if (!appPackage || !hasGeneratedApp) {
       setGenerationMode(MODE_STRUCTURED)
       setQuestionType(DEFAULT_STRUCTURED_TYPE)
       return
@@ -941,7 +1000,7 @@ export default function App() {
     } else {
       setQuestionType(DEFAULT_STRUCTURED_TYPE)
     }
-  }, [appPackage])
+  }, [appPackage, hasGeneratedApp])
 
   useEffect(() => {
     if (bootstrapInfo) {
@@ -1164,18 +1223,6 @@ export default function App() {
           onDismiss={() => setIsTrayOpen(false)}
         >
           <View as="div" padding="medium">
-            <Flex justifyItems="end" margin="0 0 small 0">
-              <IconButton
-                screenReaderLabel="Close controls"
-                onClick={() => setIsTrayOpen(false)}
-                size="small"
-                withBackground={false}
-                withBorder={false}
-              >
-                <IconHamburgerLine />
-              </IconButton>
-            </Flex>
-
             {errorMessage && (
               <Alert
                 variant="error"
@@ -1206,62 +1253,47 @@ export default function App() {
 
             <View as="div" margin="small 0">
               <View as="div" margin="0 0 small 0">
-                <Text size="small" weight="bold">Generation mode</Text>
-                <Flex gap="small" margin="x-small 0 0 0">
-                  <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
-                    <input
-                      type="radio"
-                      name="generation_mode"
-                      value={MODE_STRUCTURED}
-                      checked={generationMode === MODE_STRUCTURED}
-                      onChange={() => setGenerationMode(MODE_STRUCTURED)}
-                    />
-                    <span>Standard question type</span>
-                  </label>
-                  <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
-                    <input
-                      type="radio"
-                      name="generation_mode"
-                      value={MODE_OPEN}
-                      checked={generationMode === MODE_OPEN}
-                      onChange={() => setGenerationMode(MODE_OPEN)}
-                    />
-                    <span>Freestyle activity</span>
-                  </label>
+                <Flex justifyItems="space-between" alignItems="center" margin="0 0 x-small 0">
+                  <Text size="medium" weight="bold">Generation mode</Text>
+                  <IconButton
+                    screenReaderLabel="Close controls"
+                    onClick={() => setIsTrayOpen(false)}
+                    size="small"
+                    withBackground={false}
+                    withBorder={false}
+                  >
+                    <IconHamburgerLine />
+                  </IconButton>
                 </Flex>
+                <RadioInputGroup
+                  name="generation_mode"
+                  description={<ScreenReaderContent>Generation mode</ScreenReaderContent>}
+                  layout="columns"
+                  value={generationMode}
+                  onChange={(_, value) => setGenerationMode(value)}
+                  disabled={generating}
+                >
+                  <RadioInput value={MODE_STRUCTURED} label="Standard question type" />
+                  <RadioInput value={MODE_OPEN} label="Freestyle activity" />
+                </RadioInputGroup>
               </View>
 
               {generationMode === MODE_STRUCTURED && (
-                <View as="div" margin="0 0 small 0">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                    <Text size="small" weight="bold">Question type</Text>
-                    <select
-                      value={questionType}
-                      onChange={(e) => setQuestionType(e.target.value)}
-                    >
-                      <option value="multiple_choice_single_answer">Multiple choice (single answer)</option>
-                      <option value="multiple_choice_multiple_answer">Multiple choice (multiple answer)</option>
-                      <option value="matching">Matching</option>
-                      <option value="fill_in_blank">Fill in the blank</option>
-                      <option value="ordering">Ordering</option>
-                      <option value="numeric">Numeric</option>
-                      <option value="image_hotspot_single">Image hotspot (single answer)</option>
-                    </select>
-                  </label>
-                </View>
-              )}
-
-              {generationMode === MODE_STRUCTURED && (
-                <View as="div" margin="0 0 small 0">
-                  <label style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
-                    <input
-                      type="checkbox"
-                      checked={appPackage?.questions?.[0]?.reveal_correct_after_two_incorrect_attempts !== false}
-                      onChange={(e) => updateStructuredRevealSetting(e.target.checked)}
-                      disabled={generating || !appPackage}
-                    />
-                    <span>Show correct answer after 2 incorrect attempts</span>
-                  </label>
+                <View as="div" margin="0 0 small medium">
+                  <SimpleSelect
+                    renderLabel="Question type"
+                    value={questionType}
+                    onChange={(_, data) => setQuestionType(String(data.value || DEFAULT_STRUCTURED_TYPE))}
+                    interaction={generating ? 'disabled' : 'enabled'}
+                  >
+                    <SimpleSelect.Option id="qtype-mc-single" value="multiple_choice_single_answer">Multiple choice (single answer)</SimpleSelect.Option>
+                    <SimpleSelect.Option id="qtype-mc-multi" value="multiple_choice_multiple_answer">Multiple choice (multiple answer)</SimpleSelect.Option>
+                    <SimpleSelect.Option id="qtype-matching" value="matching">Matching</SimpleSelect.Option>
+                    <SimpleSelect.Option id="qtype-fill-blank" value="fill_in_blank">Fill in the blank</SimpleSelect.Option>
+                    <SimpleSelect.Option id="qtype-ordering" value="ordering">Ordering</SimpleSelect.Option>
+                    <SimpleSelect.Option id="qtype-numeric" value="numeric">Numeric</SimpleSelect.Option>
+                    <SimpleSelect.Option id="qtype-image-hotspot-single" value="image_hotspot_single">Image hotspot (single answer)</SimpleSelect.Option>
+                  </SimpleSelect>
                 </View>
               )}
 
@@ -1269,14 +1301,29 @@ export default function App() {
                 <View as="div" margin="0 0 medium 0" padding="small" borderWidth="small" borderRadius="medium">
                   <Flex direction="column" gap="small">
                     <Flex justifyItems="space-between" alignItems="center">
-                      <Text size="small" weight="bold">Images (app-scoped)</Text>
+                      <Text size="small" weight="bold">Images</Text>
                       <Flex gap="x-small">
                         <Button size="small" onClick={() => setIsImagePanelOpen((open) => !open)}>
-                          {isImagePanelOpen ? 'Close image panel' : '+ Image'}
+                          + Image
                         </Button>
-                        <Button size="small" onClick={() => loadAssets()} disabled={assetsLoading || uploadingAsset}>
-                          Refresh
-                        </Button>
+                        {isImagePanelOpen && (
+                          <IconButton
+                            size="small"
+                            screenReaderLabel="Close image panel"
+                            onClick={() => setIsImagePanelOpen(false)}
+                            disabled={uploadingAsset}
+                          >
+                            <IconXLine />
+                          </IconButton>
+                        )}
+                        <IconButton
+                          size="small"
+                          screenReaderLabel="Refresh image list"
+                          onClick={() => loadAssets()}
+                          disabled={assetsLoading || uploadingAsset}
+                        >
+                          <IconRefreshLine />
+                        </IconButton>
                       </Flex>
                     </Flex>
 
@@ -1297,79 +1344,68 @@ export default function App() {
                             />
                           </label>
 
-                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                            <Text size="small">Copyright basis (required)</Text>
-                            <select
-                              value={assetRightsBasis}
-                              onChange={(e) => {
-                                const next = e.target.value
-                                setAssetRightsBasis(next)
-                                if (next !== 'creative_commons') setAssetCcLicense('')
-                              }}
-                              disabled={uploadingAsset}
-                            >
-                              <option value="">Select basis</option>
-                              {RIGHTS_BASIS_OPTIONS.map((option) => (
-                                <option key={option.value} value={option.value}>{option.label}</option>
-                              ))}
-                            </select>
-                          </label>
+                          <SimpleSelect
+                            renderLabel="Copyright basis (required)"
+                            value={assetRightsBasis}
+                            onChange={(_, data) => {
+                              const next = String(data.value || '')
+                              setAssetRightsBasis(next)
+                              if (next !== 'creative_commons') setAssetCcLicense('')
+                            }}
+                            interaction={uploadingAsset ? 'disabled' : 'enabled'}
+                          >
+                            <SimpleSelect.Option id="rights-basis-empty" value="">Select basis</SimpleSelect.Option>
+                            {RIGHTS_BASIS_OPTIONS.map((option) => (
+                              <SimpleSelect.Option key={option.value} id={`rights-basis-${option.value}`} value={option.value}>
+                                {option.label}
+                              </SimpleSelect.Option>
+                            ))}
+                          </SimpleSelect>
 
                           {assetRightsBasis === 'creative_commons' && (
-                            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                              <Text size="small">Creative Commons type (required)</Text>
-                              <select
-                                value={assetCcLicense}
-                                onChange={(e) => setAssetCcLicense(e.target.value)}
-                                disabled={uploadingAsset}
-                              >
-                                <option value="">Select CC type</option>
-                                {CC_LICENSE_OPTIONS.map((option) => (
-                                  <option key={option.value} value={option.value}>{option.label}</option>
-                                ))}
-                              </select>
-                            </label>
+                            <SimpleSelect
+                              renderLabel="Creative Commons type (required)"
+                              value={assetCcLicense}
+                              onChange={(_, data) => setAssetCcLicense(String(data.value || ''))}
+                              interaction={uploadingAsset ? 'disabled' : 'enabled'}
+                            >
+                              <SimpleSelect.Option id="rights-cc-empty" value="">Select CC type</SimpleSelect.Option>
+                              {CC_LICENSE_OPTIONS.map((option) => (
+                                <SimpleSelect.Option key={option.value} id={`rights-cc-${option.value}`} value={option.value}>
+                                  {option.label}
+                                </SimpleSelect.Option>
+                              ))}
+                            </SimpleSelect>
                           )}
 
-                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                            <Text size="small">Copyright holder (optional)</Text>
-                            <input
-                              type="text"
-                              value={assetCopyrightHolder}
-                              onChange={(e) => setAssetCopyrightHolder(e.target.value)}
-                              disabled={uploadingAsset}
-                            />
-                          </label>
+                          <TextInput
+                            renderLabel="Copyright holder (optional)"
+                            value={assetCopyrightHolder}
+                            onChange={(_, value) => setAssetCopyrightHolder(value)}
+                            interaction={uploadingAsset ? 'disabled' : 'enabled'}
+                          />
 
-                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                            <Text size="small">Label (optional)</Text>
-                            <input
-                              type="text"
-                              value={assetLabel}
-                              onChange={(e) => setAssetLabel(e.target.value)}
-                              disabled={uploadingAsset}
-                            />
-                          </label>
+                          <TextInput
+                            renderLabel="Label (optional)"
+                            value={assetLabel}
+                            onChange={(_, value) => setAssetLabel(value)}
+                            interaction={uploadingAsset ? 'disabled' : 'enabled'}
+                          />
 
-                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                            <Text size="small">Alt text (optional)</Text>
-                            <input
-                              type="text"
-                              value={assetAlt}
-                              onChange={(e) => setAssetAlt(e.target.value)}
-                              disabled={uploadingAsset}
-                            />
-                          </label>
+                          <TextInput
+                            renderLabel="Alt text (optional)"
+                            value={assetAlt}
+                            onChange={(_, value) => setAssetAlt(value)}
+                            interaction={uploadingAsset ? 'disabled' : 'enabled'}
+                          />
 
-                          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                            <Text size="small">Rights note (optional)</Text>
-                            <textarea
-                              value={assetRightsNote}
-                              onChange={(e) => setAssetRightsNote(e.target.value)}
-                              rows={2}
-                              disabled={uploadingAsset}
-                            />
-                          </label>
+                          <TextArea
+                            label="Rights note (optional)"
+                            value={assetRightsNote}
+                            onChange={(e) => setAssetRightsNote(e.target.value)}
+                            height="80px"
+                            disabled={uploadingAsset}
+                          />
 
                           <Flex gap="small" alignItems="center">
                             <Button
@@ -1385,7 +1421,6 @@ export default function App() {
                     )}
 
                     <View as="div">
-                      <Text size="small" weight="bold">Uploaded images</Text>
                       {assetsLoading ? (
                         <Text size="small" color="secondary">Loading…</Text>
                       ) : assets.length === 0 ? (
@@ -1397,13 +1432,14 @@ export default function App() {
                               <Flex direction="column" gap="xx-small">
                                 <Flex justifyItems="space-between" alignItems="start">
                                   <Text size="small"><strong>{asset.label || asset.id}</strong></Text>
-                                  <Button
+                                  <IconButton
                                     size="small"
-                                    onClick={() => deleteAssetImage(asset.id)}
+                                    screenReaderLabel={`Delete image ${asset.label || asset.id}`}
+                                    onClick={() => deleteAssetImage(asset.id, isEditMode)}
                                     disabled={deletingAssetId === asset.id}
                                   >
-                                    {deletingAssetId === asset.id ? '...' : 'X'}
-                                  </Button>
+                                    <IconXLine />
+                                  </IconButton>
                                 </Flex>
                                 <Text size="x-small" color="secondary">
                                   {asset.width}x{asset.height} · {(asset.bytes / 1024).toFixed(1)} KB · {asset.rights_basis}{asset.cc_license ? ` (${asset.cc_license})` : ''}
@@ -1431,8 +1467,40 @@ export default function App() {
                 height="100px"
               />
 
-              <Flex gap="small" margin="small 0" justifyItems="end" style={{ flexWrap: 'wrap' }}>
-                {appPackage && !showStartAgainConfirm && (
+              <View as="div" margin="0 0 small 0">
+                <ToggleDetails
+                  summary="Advanced"
+                  expanded={showAdvancedControls}
+                  onToggle={(_, expanded) => setShowAdvancedControls(expanded)}
+                >
+                  <View as="div" margin="small 0 0 0">
+                    <SimpleSelect
+                      renderLabel="Vision mode"
+                      value={visionMode}
+                      onChange={(_, data) => setVisionMode(String(data.value || VISION_MODE_AUTO))}
+                      interaction={generating ? 'disabled' : 'enabled'}
+                    >
+                      <SimpleSelect.Option id="vision-auto" value={VISION_MODE_AUTO}>Auto (recommended)</SimpleSelect.Option>
+                      <SimpleSelect.Option id="vision-force" value={VISION_MODE_FORCE}>On (force vision)</SimpleSelect.Option>
+                      <SimpleSelect.Option id="vision-off" value={VISION_MODE_OFF}>Off (text only)</SimpleSelect.Option>
+                    </SimpleSelect>
+                  </View>
+
+                  {generationMode === MODE_STRUCTURED && (
+                    <View as="div" margin="small 0 0 0">
+                      <Checkbox
+                        label="Show correct answer after 2 incorrect attempts"
+                        checked={appPackage?.questions?.[0]?.reveal_correct_after_two_incorrect_attempts !== false}
+                        onChange={(e) => updateStructuredRevealSetting(Boolean(e.target.checked))}
+                        disabled={generating || !appPackage}
+                      />
+                    </View>
+                  )}
+                </ToggleDetails>
+              </View>
+
+              <Flex gap="small" margin="medium 0 0 0" justifyItems="end" style={{ flexWrap: 'wrap' }}>
+                {hasGeneratedApp && !showStartAgainConfirm && (
                   <Button
                     onClick={() => setShowStartAgainConfirm(true)}
                     disabled={generating}
@@ -1441,7 +1509,7 @@ export default function App() {
                   </Button>
                 )}
 
-                {previousApp && !generating && (
+                {hasGeneratedApp && previousApp && hasUnsavedChanges && !generating && (
                   <Button onClick={undoRevision}>
                     Undo
                   </Button>
@@ -1486,7 +1554,7 @@ export default function App() {
                   </Button>
                   <Button
                     onClick={insertDeepLinkItem}
-                    disabled={insertingDeepLink || savingForInsert || generating || !appPackage?.id}
+                    disabled={insertingDeepLink || savingForInsert || generating || !appPackage?.id || !hasGeneratedApp}
                     color="primary"
                   >
                     {savingForInsert ? 'Saving…' : insertingDeepLink ? 'Inserting…' : 'Insert into Canvas'}
