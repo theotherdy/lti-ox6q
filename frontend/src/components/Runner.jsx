@@ -32,145 +32,15 @@ function jsonHeaders(token) {
   return h
 }
 
-function buildSrcDoc(pkg, channel) {
-  const title = pkg.title || 'Learning App'
-  const html = pkg.html || "<div id='app'></div>"
-  const css = pkg.css || ''
-  const js = pkg.js || ''
-
-  // A tiny RPC helper between iframe ↔ parent.
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${title}</title>
-    <style>html,body{margin:0;padding:0;}</style>
-    <style>${css}</style>
-  </head>
-  <body>
-    ${html}
-    <script>
-      (function(){
-        const CHANNEL = ${JSON.stringify(channel)};
-        const pending = new Map();
-        let nextId = 1;
-
-        function callParent(type, payload){
-          return new Promise((resolve, reject) => {
-            const id = nextId++;
-            pending.set(id, {resolve, reject});
-            window.parent.postMessage({ __ox6q: true, channel: CHANNEL, id, type, payload }, '*');
-          });
-        }
-
-        window.addEventListener('message', (event) => {
-          const msg = event.data;
-          if (!msg || msg.__ox6q !== true || msg.channel !== CHANNEL || !msg.replyTo) return;
-          const entry = pending.get(msg.replyTo);
-          if (!entry) return;
-          pending.delete(msg.replyTo);
-          if (msg.ok) entry.resolve(msg.result);
-          else entry.reject(new Error(msg.error || 'RPC failed'));
-        });
-
-        window.sdk = {
-          getState: () => callParent('getState'),
-          setState: (state) => callParent('setState', {state}),
-          notify: (input) => {
-            const payload =
-            typeof input === 'string'
-              ? { message: input, variant: 'info' }
-              : { message: String(input?.message ?? ''), variant: String(input?.variant ?? 'info') }
-              return callParent('notify', payload)
-          }
-        };
-        
-        // Nice dev-friendly shim: if generated apps call alert(), turn it into a notify.
-        window.alert = (msg) => window.sdk.notify({ variant: 'info', message: String(msg) });
-
-        let resizeTimer = null;
-        let lastHeight = 0;
-
-        function getDocHeight() {
-          const body = document.body;
-          const html = document.documentElement;
-          if (!body || !html) return 0;
-          return Math.max(
-            body.scrollHeight,
-            body.offsetHeight,
-            html.scrollHeight,
-            html.offsetHeight,
-            html.clientHeight
-          );
-        }
-
-        function postResize() {
-          const next = Math.ceil(getDocHeight());
-          if (!Number.isFinite(next) || next <= 0) return;
-          if (Math.abs(next - lastHeight) < 2) return;
-          lastHeight = next;
-          window.parent.postMessage({
-            __ox6q: true,
-            channel: CHANNEL,
-            type: 'resize',
-            payload: { height: next }
-          }, '*');
-        }
-
-        function scheduleResize() {
-          if (resizeTimer) clearTimeout(resizeTimer);
-          resizeTimer = setTimeout(postResize, 60);
-        }
-
-        if (window.ResizeObserver) {
-          const ro = new ResizeObserver(scheduleResize);
-          ro.observe(document.documentElement);
-          if (document.body) ro.observe(document.body);
-        }
-
-        window.addEventListener('resize', scheduleResize);
-        window.addEventListener('load', () => {
-          postResize();
-          setTimeout(postResize, 100);
-          setTimeout(postResize, 400);
-        });
-
-        const mo = new MutationObserver(scheduleResize);
-        mo.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-          characterData: true,
-          attributes: true
-        });
-
-        postResize();
-      })();
-    </script>
-    <script>
-${js}
-    </script>
-  </body>
-</html>`;
-}
-
 export default function Runner({ apiBase, token, pkg, onError }) {
   const iframeRef = useRef(null)
-  const [notices, setNotices] = useState([]) //used to display notifications from iFramed app via callParent('notify', payload);
+  const [notices, setNotices] = useState([])
   const [iframeHeight, setIframeHeight] = useState(DEFAULT_IFRAME_HEIGHT)
-  const channel = useMemo(() => createChannelToken(), [pkg?.id])
+  const channel = useMemo(() => createChannelToken(), [pkg?.id, pkg?.js, pkg?.css, pkg?.html, pkg?.title])
 
-  const srcDoc = useMemo(() => {
-    if (!pkg) return null  //pkg will be null when first loads
-    return buildSrcDoc(pkg, channel)
-  }, [pkg, channel])
-
-  //helper for pushing notices from iFramed app into Alert in this container app
   function pushNotice({ message, variant }) {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
     const msg = String(message || '').slice(0, 300)
-
-    // Instructure variants commonly include: info, success, warning, danger
     const v = (variant === 'error') ? 'danger' : variant
     const safeVariant = ['info', 'success', 'warning', 'danger'].includes(v) ? v : 'info'
 
@@ -180,16 +50,30 @@ export default function Runner({ apiBase, token, pkg, onError }) {
 
   useEffect(() => {
     setIframeHeight(DEFAULT_IFRAME_HEIGHT)
-  }, [pkg?.id])
+  }, [pkg?.id, pkg?.js])
 
   useEffect(() => {
     const iframe = iframeRef.current
-    if (!iframe) return
+    if (!iframe || !pkg) return
+
+    function postInit() {
+      iframe.contentWindow?.postMessage({
+        __ox6q: true,
+        type: 'open-react:init',
+        channel,
+        payload: { pkg },
+      }, '*')
+    }
 
     async function handleRpc(event) {
-      // Only accept messages from our iframe
       if (event.source !== iframe.contentWindow) return
       const msg = event.data
+
+      if (msg?.__ox6q === true && msg?.type === 'open-react:ready') {
+        postInit()
+        return
+      }
+
       if (!msg || msg.__ox6q !== true || msg.channel !== channel || !msg.type) return
       if (!ALLOWED_MESSAGE_TYPES.has(msg.type)) return
 
@@ -205,11 +89,11 @@ export default function Runner({ apiBase, token, pkg, onError }) {
       if (!msg.id) return
 
       const reply = async (ok, resultOrError) => {
-        iframe.contentWindow.postMessage(
+        iframe.contentWindow?.postMessage(
           ok
             ? { __ox6q: true, channel, replyTo: msg.id, ok: true, result: resultOrError }
             : { __ox6q: true, channel, replyTo: msg.id, ok: false, error: String(resultOrError) },
-          '*'
+          '*',
         )
       }
 
@@ -265,10 +149,7 @@ export default function Runner({ apiBase, token, pkg, onError }) {
           if (!fitsJsonSize(msg.payload, MAX_NOTIFY_PAYLOAD_BYTES)) {
             throw new Error('notify payload too large')
           }
-          pushNotice({
-            message,
-            variant,
-          })
+          pushNotice({ message, variant })
           await reply(true, { ok: true })
           return
         }
@@ -280,16 +161,24 @@ export default function Runner({ apiBase, token, pkg, onError }) {
     }
 
     window.addEventListener('message', handleRpc)
-    return () => window.removeEventListener('message', handleRpc)
+    postInit()
+    const t1 = setTimeout(postInit, 120)
+    const t2 = setTimeout(postInit, 350)
+    const t3 = setTimeout(postInit, 900)
+
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
+      window.removeEventListener('message', handleRpc)
+    }
   }, [apiBase, channel, onError, pkg, token])
 
   if (!token) {
     return (
       <View as="div" padding="medium">
         <Text color="secondary">Not authenticated yet.</Text>
-        <Text color="secondary">
-          Launch this tool from your LMS (LTI) to initialise a session.
-        </Text>
+        <Text color="secondary">Launch this tool from your LMS (LTI) to initialise a session.</Text>
       </View>
     )
   }
@@ -297,34 +186,23 @@ export default function Runner({ apiBase, token, pkg, onError }) {
   if (!pkg) {
     return (
       <View as="div" padding="medium">
-        <Text color="secondary">No application loaded yet. </Text>
-        <Text color="secondary">
-          Generate an app to begin.
-        </Text>
+        <Text color="secondary">No application loaded yet.</Text>
+        <Text color="secondary">Generate an app to begin.</Text>
       </View>
     )
   }
 
   return (
     <View as="div">
-      {/* App iframe */}
-      <View
-        as="div"
-        borderWidth="small"
-        borderRadius="medium"
-        background="primary"
-        margin="0"
-        position="relative"
-      >
-        {/* !!!!!Don't allow any powers other than allow-scripts without serious thought!!!!!! */}
+      <View as="div" borderWidth="small" borderRadius="medium" background="primary" margin="0" position="relative">
         <iframe
           ref={iframeRef}
+          key={channel}
           title="Learning app"
           sandbox="allow-scripts"
-          srcDoc={srcDoc}
+          src={`${import.meta.env.BASE_URL}open-react-runner.html`}
           style={{ width: '100%', height: `${iframeHeight}px`, border: 'none', borderRadius: '8px', display: 'block' }}
         />
-        {/* Notification overlay */}
         <div
           style={{
             position: 'absolute',

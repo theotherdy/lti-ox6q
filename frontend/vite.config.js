@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         main: 'index.html',
         structuredRunner: 'structured-runner.html',
+        openReactRunner: 'open-react-runner.html',
       },
     },
   },

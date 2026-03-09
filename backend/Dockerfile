@@ -8,12 +8,14 @@ FROM php:8.2-cli
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
      git unzip curl ca-certificates default-mysql-client \
+     nodejs npm \
      libfreetype6-dev \
      libjpeg62-turbo-dev \
      libpng-dev \
      libwebp-dev \
   && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
   && docker-php-ext-install pdo pdo_mysql gd exif \
+  && npm install -g esbuild \
   && rm -rf /var/lib/apt/lists/*
 
 # Composer

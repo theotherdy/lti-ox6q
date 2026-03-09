@@ -23,6 +23,7 @@ RUN apt-get update \
      supervisor \
      curl \
      ca-certificates \
+     nodejs npm \
      default-mysql-client \
      libfreetype6-dev \
      libjpeg62-turbo-dev \
@@ -30,6 +31,7 @@ RUN apt-get update \
      libwebp-dev \
   && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
   && docker-php-ext-install pdo pdo_mysql opcache gd exif \
+  && npm install -g esbuild \
   && rm -rf /var/lib/apt/lists/*
 
 # Recommended opcache settings for production

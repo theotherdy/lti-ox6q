@@ -73,16 +73,12 @@ class GenerateVisionRoutingTest extends TestCase
 
         Http::fakeSequence()
             ->push([
-                'choices' => [[
-                    'message' => [
-                        'content' => json_encode([
-                            'title' => 'Revised app',
-                            'html' => '<div id="app"><img src="/storage/' . $path . '"></div>',
-                            'css' => '',
-                            'js' => '',
-                        ], JSON_UNESCAPED_SLASHES),
-                    ],
-                ]],
+                'output_text' => json_encode([
+                    'title' => 'Revised app',
+                    'html' => '<div id="app"><img src="/storage/' . $path . '"></div>',
+                    'css' => '',
+                    'js' => '',
+                ], JSON_UNESCAPED_SLASHES),
                 'usage' => ['total_tokens' => 30],
             ], 200);
 

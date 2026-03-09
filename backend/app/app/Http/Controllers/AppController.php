@@ -33,6 +33,7 @@ class AppController extends Controller
             'html' => "<div id='app'></div>",
             'css' => '',
             'js' => '',
+            'source_jsx' => '',
             'structured_json' => null,
             'lifecycle_status' => 'draft_uninserted',
             'inserted_at' => null,
@@ -47,6 +48,8 @@ class AppController extends Controller
             'html' => "<div id='app'></div>",
             'css' => '',
             'js' => '',
+            'source_jsx' => '',
+            'runtime' => 'react_jsx',
             'lifecycle_status' => 'draft_uninserted',
             'inserted_at' => null,
         ], 201);
@@ -92,6 +95,8 @@ class AppController extends Controller
             'html' => $row->html,
             'css' => $row->css,
             'js' => $row->js,
+            'source_jsx' => (string) ($row->source_jsx ?? ''),
+            'runtime' => 'react_jsx',
             'lifecycle_status' => (string) ($row->lifecycle_status ?? 'inserted'),
             'inserted_at' => $row->inserted_at,
         ]);
@@ -336,6 +341,7 @@ class AppController extends Controller
                     'html' => null,
                     'css' => null,
                     'js' => null,
+                    'source_jsx' => null,
                     'structured_json' => json_encode($payload),
                     'updated_at' => now(),
                 ]);
@@ -350,6 +356,7 @@ class AppController extends Controller
                 'html' => 'required|string',
                 'css' => 'required|string',
                 'js' => 'required|string',
+                'source_jsx' => 'required|string',
             ]);
 
             $violations = $this->validatePackage([
@@ -357,7 +364,7 @@ class AppController extends Controller
                 'html' => $request->html,
                 'css' => $request->css,
                 'js' => $request->js,
-            ]);
+            ], (string) $request->input('source_jsx', ''));
 
             if (!empty($violations)) {
                 return response()->json([
@@ -373,6 +380,7 @@ class AppController extends Controller
                     'html' => $request->html,
                     'css' => $request->css,
                     'js' => $request->js,
+                    'source_jsx' => $request->source_jsx,
                     'structured_json' => null,
                     'updated_at' => now(),
                 ]);
@@ -632,12 +640,13 @@ class AppController extends Controller
         return is_array($parts) && isset($parts['host']) && in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true);
     }
 
-    private function validatePackage(array $pkg): array
+    private function validatePackage(array $pkg, ?string $sourceJsx = null): array
     {
         $violations = [];
 
         $html = $pkg['html'] ?? '';
         $js   = $pkg['js']   ?? '';
+        $jsx  = $sourceJsx ?? '';
 
         // ---- HTML checks ----
         if (stripos($html, '<form') !== false) {
@@ -669,12 +678,33 @@ class AppController extends Controller
             $violations[] = 'Navigation via window.location is not allowed';
         }
 
+        if (stripos($js, 'location.reload(') !== false) {
+            $violations[] = 'location.reload() is not allowed';
+        }
+
         if (stripos($js, 'document.cookie') !== false) {
             $violations[] = 'Accessing cookies is not allowed';
         }
 
         if (stripos($js, 'localStorage') !== false || stripos($js, 'sessionStorage') !== false) {
             $violations[] = 'Browser storage APIs are not allowed (use sdk.getState/setState)';
+        }
+
+        $forbiddenPatterns = [
+            'import(',
+            'importScripts(',
+            'new Worker(',
+            'new SharedWorker(',
+            'WebSocket(',
+            '<script src',
+            'from "http',
+            "from 'http",
+        ];
+
+        foreach ($forbiddenPatterns as $pattern) {
+            if (stripos($js, $pattern) !== false || stripos($jsx, $pattern) !== false) {
+                $violations[] = sprintf('Forbidden API/pattern detected: %s', $pattern);
+            }
         }
 
         return $violations;

@@ -8,52 +8,26 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
-class GenerateIncludesImageAssetContextTest extends TestCase
+class GeneratePreviewRevisionUsesBasePackageTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_open_interaction_generation_includes_available_image_assets_context(): void
+    public function test_preview_revision_uses_base_package_as_llm_baseline(): void
     {
         $token = $this->buildAuthToken();
+
         $appId = DB::table('apps')->insertGetId([
-            'title' => 'Existing app',
+            'title' => 'Saved title',
             'kind' => 'open_interaction',
-            'html' => '<div id="app"></div>',
-            'css' => '',
-            'js' => '',
+            'html' => '<div id="app">SAVED_HTML</div>',
+            'css' => '/* saved css */',
+            'js' => '// saved js',
             'structured_json' => null,
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
-        DB::table('app_assets')->insert([
-            'id' => 'asset-1',
-            'app_id' => $appId,
-            'kind' => 'image',
-            'disk' => 'public',
-            'path_optimized' => 'apps/' . $appId . '/assets/asset-1/optimized.webp',
-            'path_original' => null,
-            'url_optimized' => 'https://learntech.example/storage/apps/' . $appId . '/assets/asset-1/optimized.webp',
-            'url_original' => null,
-            'mime_original' => 'image/png',
-            'mime_optimized' => 'image/webp',
-            'bytes_original' => 1200,
-            'bytes_optimized' => 900,
-            'width' => 800,
-            'height' => 600,
-            'checksum_sha256' => str_repeat('a', 64),
-            'label' => 'Microscope image',
-            'alt_text' => 'Microscope slide',
-            'rights_basis' => 'public_domain',
-            'cc_license' => null,
-            'copyright_holder' => null,
-            'rights_note' => null,
-            'rights_declared_by_sub' => 'editor-user',
-            'rights_declared_at' => now(),
-            'created_by_sub' => 'editor-user',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        $baseHtml = '<div id="app">PREVIEW_BASE_HTML</div>';
 
         Http::fake([
             'https://api.openai.com/v1/chat/completions' => Http::response([
@@ -61,7 +35,7 @@ class GenerateIncludesImageAssetContextTest extends TestCase
                     'message' => [
                         'content' => json_encode([
                             'title' => 'Revised app',
-                            'html' => '<div id="app"><img src="https://learntech.example/storage/apps/' . $appId . '/assets/asset-1/optimized.webp"></div>',
+                            'html' => $baseHtml,
                             'css' => '',
                             'js' => '',
                         ], JSON_UNESCAPED_SLASHES),
@@ -72,7 +46,7 @@ class GenerateIncludesImageAssetContextTest extends TestCase
             'https://api.openai.com/v1/responses' => Http::response([
                 'output_text' => json_encode([
                     'title' => 'Revised app',
-                    'html' => '<div id="app"><img src="https://learntech.example/storage/apps/' . $appId . '/assets/asset-1/optimized.webp"></div>',
+                    'html' => $baseHtml,
                     'css' => '',
                     'js' => '',
                 ], JSON_UNESCAPED_SLASHES),
@@ -82,13 +56,24 @@ class GenerateIncludesImageAssetContextTest extends TestCase
 
         $this->withHeader('Authorization', "Bearer {$token}")
             ->postJson('/api/apps/generate', [
-                'prompt' => 'Use the microscope image in the interface.',
+                'prompt' => 'Change styling only.',
                 'app_id' => $appId,
                 'preview' => true,
                 'generation_mode' => 'open_interaction',
+                'base_package' => [
+                    'kind' => 'open_interaction',
+                    'title' => 'Preview title',
+                    'html' => $baseHtml,
+                    'css' => '/* preview css */',
+                    'js' => '// preview js',
+                ],
             ])
             ->assertOk()
-            ->assertJsonPath('kind', 'open_interaction');
+            ->assertJsonPath('change_summary.changed', true)
+            ->assertJsonPath('change_summary.metrics.html_changed', false)
+            ->assertJsonPath('change_summary.metrics.css_changed', true)
+            ->assertJsonPath('change_summary.metrics.js_changed', true)
+            ->assertJsonPath('change_summary.metrics.title_changed', true);
 
         Http::assertSent(function ($request) {
             $payload = $request->data();
@@ -107,16 +92,15 @@ class GenerateIncludesImageAssetContextTest extends TestCase
             }
 
             $combined = implode("\n", array_merge($messageStrings, $inputStrings));
-            return str_contains($combined, 'AVAILABLE_IMAGE_ASSETS')
-                && str_contains($combined, 'asset-1')
-                && str_contains($combined, 'Microscope image')
-                && str_contains($combined, 'rights_basis');
+
+            return str_contains($combined, 'PREVIEW_BASE_HTML')
+                && !str_contains($combined, 'SAVED_HTML');
         });
     }
 
     private function buildAuthToken(): string
     {
-        $secret = 'test-local-secret-generate-1234567890123';
+        $secret = 'test-local-secret-preview-base-1234567890';
         putenv("LOCAL_JWT_SECRET={$secret}");
         $_ENV['LOCAL_JWT_SECRET'] = $secret;
         $_SERVER['LOCAL_JWT_SECRET'] = $secret;
@@ -130,8 +114,8 @@ class GenerateIncludesImageAssetContextTest extends TestCase
             'launch_mode' => 'resource',
             'lti' => [
                 'issuer' => 'https://lti-dev.canvas.ox.ac.uk',
-                'deployment_id' => 'deployment-generate',
-                'resource_link_id' => 'resource-generate',
+                'deployment_id' => 'deployment-preview-base',
+                'resource_link_id' => 'resource-preview-base',
                 'message_type' => 'LtiResourceLinkRequest',
                 'is_instructor' => true,
             ],

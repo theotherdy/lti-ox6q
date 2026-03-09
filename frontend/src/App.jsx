@@ -150,6 +150,7 @@ export default function App() {
   const [visionMode, setVisionMode] = useState(VISION_MODE_AUTO)
   const [showStartAgainConfirm, setShowStartAgainConfirm] = useState(false)
   const [hasGeneratedApp, setHasGeneratedApp] = useState(false)
+  const [lastRevisionSummary, setLastRevisionSummary] = useState(null)
   const [isImagePanelOpen, setIsImagePanelOpen] = useState(false)
   const [assets, setAssets] = useState([])
   const [assetsLoading, setAssetsLoading] = useState(false)
@@ -471,6 +472,24 @@ export default function App() {
 
       if (isRevising) {
         requestBody.preview = true
+        if (appPackage?.kind === MODE_OPEN) {
+          requestBody.base_package = {
+            kind: MODE_OPEN,
+            title: appPackage.title,
+            html: appPackage.html,
+            css: appPackage.css,
+            js: appPackage.js,
+            source_jsx: appPackage.source_jsx,
+          }
+        } else if (appPackage?.kind === MODE_STRUCTURED) {
+          requestBody.base_package = {
+            kind: MODE_STRUCTURED,
+            title: appPackage.title,
+            schema_version: appPackage.schema_version,
+            questions: appPackage.questions,
+            meta: appPackage.meta,
+          }
+        }
       }
 
       const { res, body } = await fetchJsonWithAutoRefresh(`${API_BASE}/api/apps/generate`, {
@@ -492,11 +511,22 @@ export default function App() {
         setPreviousApp(appPackage)
         setAppPackage(body)
         setHasGeneratedApp(true)
+        if (body?.change_summary && typeof body.change_summary === 'object') {
+          setLastRevisionSummary({
+            changeSummary: body.change_summary,
+            humanSummary: Array.isArray(body.human_change_summary) ? body.human_change_summary : [],
+            autoRetry: Boolean(body.auto_retry),
+            noOpRevisionDetected: Boolean(body.no_op_revision_detected),
+          })
+        } else {
+          setLastRevisionSummary(null)
+        }
       } else {
         setAppPackage(body)
         setSavedApp(body)
         setPreviousApp(null)
         setHasGeneratedApp(true)
+        setLastRevisionSummary(null)
         setPendingAssetDeletes([])
         if (body.id && !isLtiLaunch) {
           sessionStorage.setItem('lastAppId', String(body.id))
@@ -532,6 +562,7 @@ export default function App() {
           html: appPackage.html,
           css: appPackage.css,
           js: appPackage.js,
+          source_jsx: appPackage.source_jsx || appPackage.js,
           reset_non_instructor_state: resetNonInstructorStateOnSave,
         }
 
@@ -701,6 +732,7 @@ export default function App() {
       setAppPackage(previousApp)
     }
     setPreviousApp(null)
+    setLastRevisionSummary(null)
   }
 
   async function cancelEditSession() {
@@ -709,6 +741,7 @@ export default function App() {
     setHasGeneratedApp(detectGeneratedFromPackage(savedApp))
     setSavedApp(null)
     setPreviousApp(null)
+    setLastRevisionSummary(null)
     setPendingAssetDeletes([])
     closeEditModal()
     if (restoreAppId) {
@@ -743,6 +776,7 @@ export default function App() {
     setPrompt('')
     setPreviousApp(null)
     setSavedApp(null)
+    setLastRevisionSummary(null)
     setHasGeneratedApp(false)
     setPendingAssetDeletes([])
     setAssets([])
@@ -785,6 +819,7 @@ export default function App() {
       setPrompt('')
       setPreviousApp(null)
       setSavedApp(null)
+      setLastRevisionSummary(null)
       setHasGeneratedApp(false)
       setPendingAssetDeletes([])
       setShowStartAgainConfirm(false)
@@ -1214,6 +1249,65 @@ export default function App() {
     const contentPadding = isEditMode ? 'none' : 'small'
     const previewMinHeight = isDeepLinkMode ? `${DEEP_LINK_PREVIEW_MIN_HEIGHT}px` : undefined
 
+    function renderRevisionChangeSummary() {
+      if (!lastRevisionSummary?.changeSummary) return null
+
+      const summary = lastRevisionSummary.changeSummary
+      const changed = Boolean(summary.changed)
+      const changedSections = Array.isArray(summary.changed_sections) ? summary.changed_sections : []
+      const sectionLabels = {
+        title: 'Title',
+        html: 'HTML',
+        css: 'CSS',
+        js: 'JS',
+      }
+
+      return (
+        <View as="div" margin="0 0 small 0" padding="small" borderWidth="small" borderRadius="medium" background="secondary">
+          <Flex direction="column" gap="x-small">
+            <Flex justifyItems="space-between" alignItems="center">
+              <Text size="small" weight="bold">What changed</Text>
+              <View
+                as="span"
+                padding="xxx-small xx-small"
+                borderWidth="small"
+                borderRadius="pill"
+                style={{ backgroundColor: changed ? '#d1f3df' : '#fff3d0' }}
+              >
+                <Text size="x-small" weight="bold">{changed ? 'Changed' : 'No meaningful change'}</Text>
+              </View>
+            </Flex>
+
+            {changedSections.length > 0 ? (
+              <Flex gap="x-small" style={{ flexWrap: 'wrap' }}>
+                {changedSections.map((section) => (
+                  <View key={section} as="span" padding="xxx-small xx-small" borderWidth="small" borderRadius="pill">
+                    <Text size="x-small">{sectionLabels[section] || section}</Text>
+                  </View>
+                ))}
+              </Flex>
+            ) : (
+              <Text size="small" color="secondary">Try a more specific request to force clearer changes.</Text>
+            )}
+
+            {Array.isArray(lastRevisionSummary.humanSummary) && lastRevisionSummary.humanSummary.length > 0 && (
+              <View as="ul" margin="0" padding="0 0 0 medium">
+                {lastRevisionSummary.humanSummary.slice(0, 3).map((line, index) => (
+                  <li key={`${index}-${line}`}>
+                    <Text size="small">{line}</Text>
+                  </li>
+                ))}
+              </View>
+            )}
+
+            {lastRevisionSummary.autoRetry && (
+              <Text size="x-small" color="secondary">Automatic correction was applied.</Text>
+            )}
+          </Flex>
+        </View>
+      )
+    }
+
     return (
       <DrawerLayout minHeight={drawerMinHeight} style={{ width: '100%', height: isEditMode ? '100%' : undefined }}>
         <DrawerLayout.Tray
@@ -1250,6 +1344,8 @@ export default function App() {
                 </View>
               </Alert>
             )}
+
+            {renderRevisionChangeSummary()}
 
             <View as="div" margin="small 0">
               <View as="div" margin="0 0 small 0">
