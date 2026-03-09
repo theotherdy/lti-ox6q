@@ -316,11 +316,9 @@ class GenerateAppController extends Controller
             'generation_path' => $generationPath,
             'used_asset_ids' => array_values(array_map(fn ($a) => (string) ($a['asset_id'] ?? ''), $selectedVisionAssets)),
             'warnings' => $warnings,
+            'auto_retry' => false,
         ];
 
-        if (!empty($openResult['did_auto_retry'])) {
-            $response['auto_retry'] = true;
-        }
         if (!empty($openResult['no_op_revision_detected'])) {
             $response['no_op_revision_detected'] = true;
         }

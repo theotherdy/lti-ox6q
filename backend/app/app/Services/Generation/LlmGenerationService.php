@@ -9,6 +9,35 @@ class LlmGenerationService
 {
     public function callLLM(array $messages, ?string $model = null): array
     {
+        return $this->callLLMForPackageJson($messages, $model);
+    }
+
+    public function callLLMForPackageJson(array $messages, ?string $model = null): array
+    {
+        $raw = $this->callLLMForText($messages, $model);
+        if ($raw['error']) {
+            return ['package' => null, 'error' => $raw['error'], 'raw' => null];
+        }
+
+        $text = (string) ($raw['text'] ?? '');
+
+        Log::debug('LLM raw response', ['content' => $text]);
+
+        if (!$text) {
+            return ['package' => null, 'error' => 'OpenAI returned no content', 'raw' => null];
+        }
+
+        $package = $this->parseJsonResponse($text);
+        if (!$package) {
+            Log::warning('Failed to parse LLM JSON', ['raw' => $text]);
+            return ['package' => null, 'error' => 'LLM output could not be parsed as JSON', 'raw' => $text];
+        }
+
+        return ['package' => $package, 'error' => null, 'raw' => $text];
+    }
+
+    public function callLLMForText(array $messages, ?string $model = null): array
+    {
         $startTime = microtime(true);
         $resolvedModel = (string) ($model ?: env('OPENAI_MODEL', 'gpt-4.1-mini'));
         $useResponsesApi = $this->shouldUseResponsesApi($resolvedModel);
@@ -38,7 +67,7 @@ class LlmGenerationService
                     'body' => $res->body(),
                     'duration' => round($duration, 2) . 's',
                 ]);
-                return ['package' => null, 'error' => 'Failed to generate app. Please try again.', 'raw' => null];
+                return ['text' => null, 'error' => 'Failed to generate app. Please try again.'];
             }
 
             $responseData = $res->json();
@@ -58,7 +87,7 @@ class LlmGenerationService
                 'error' => $e->getMessage(),
                 'duration' => round($duration, 2) . 's',
             ]);
-            return ['package' => null, 'error' => 'Unable to connect to AI service. Please check your connection and try again.', 'raw' => null];
+            return ['text' => null, 'error' => 'Unable to connect to AI service. Please check your connection and try again.'];
         } catch (\Exception $e) {
             $duration = microtime(true) - $startTime;
             Log::error('Unexpected error during OpenAI API request', [
@@ -66,22 +95,14 @@ class LlmGenerationService
                 'trace' => $e->getTraceAsString(),
                 'duration' => round($duration, 2) . 's',
             ]);
-            return ['package' => null, 'error' => 'An unexpected error occurred. Please try again.', 'raw' => null];
+            return ['text' => null, 'error' => 'An unexpected error occurred. Please try again.'];
         }
 
-        Log::debug('LLM raw response', ['content' => $text]);
-
-        if (!$text) {
-            return ['package' => null, 'error' => 'OpenAI returned no content', 'raw' => null];
+        if (!is_string($text) || trim($text) === '') {
+            return ['text' => null, 'error' => 'OpenAI returned no content'];
         }
 
-        $package = $this->parseJsonResponse($text);
-        if (!$package) {
-            Log::warning('Failed to parse LLM JSON', ['raw' => $text]);
-            return ['package' => null, 'error' => 'LLM output could not be parsed as JSON', 'raw' => $text];
-        }
-
-        return ['package' => $package, 'error' => null, 'raw' => $text];
+        return ['text' => trim($text), 'error' => null];
     }
 
     private function shouldUseResponsesApi(string $model): bool
@@ -100,17 +121,19 @@ class LlmGenerationService
 
             $input[] = [
                 'role' => $role,
-                'content' => $this->toResponsesContentItems($content),
+                'content' => $this->toResponsesContentItems($content, $role),
             ];
         }
 
         return $input;
     }
 
-    private function toResponsesContentItems($content): array
+    private function toResponsesContentItems($content, string $role = 'user'): array
     {
+        $textType = $role === 'assistant' ? 'output_text' : 'input_text';
+
         if (is_string($content)) {
-            return [['type' => 'input_text', 'text' => $content]];
+            return [['type' => $textType, 'text' => $content]];
         }
 
         if (!is_array($content)) {
@@ -125,13 +148,13 @@ class LlmGenerationService
 
             $type = (string) ($item['type'] ?? '');
             if ($type === 'text' && is_string($item['text'] ?? null)) {
-                $parts[] = ['type' => 'input_text', 'text' => $item['text']];
+                $parts[] = ['type' => $textType, 'text' => $item['text']];
                 continue;
             }
 
             if ($type === 'image_url') {
                 $url = $item['image_url']['url'] ?? null;
-                if (is_string($url) && $url !== '') {
+                if ($role !== 'assistant' && is_string($url) && $url !== '') {
                     $parts[] = ['type' => 'input_image', 'image_url' => $url];
                 }
             }

@@ -110,77 +110,18 @@ USR;
         $package = $build['package'];
         $sourceJsx = $build['source_jsx'];
         $violations = $this->validatePackage($package, $sourceJsx);
-        $didAutoRetry = false;
         $noOpRevisionDetected = false;
 
         if (!empty($violations)) {
-            $violationsList = implode("\n- ", $violations);
-            $correctionMessage = <<<MSG
-Your previous output violated sandbox/runtime rules:
-- {$violationsList}
-
-Please fix these issues and return corrected JSON.
-Remember:
-- js must remain JSX source.
-- no external imports/scripts.
-- no network/browser storage/navigation APIs.
-- app must work without window.sdk.
-MSG;
-
-            $messages[] = ['role' => 'assistant', 'content' => $result['raw']];
-            $messages[] = ['role' => 'user', 'content' => $correctionMessage];
-
-            $retryResult = $this->llm->callLLM($messages, $modelOverride);
-            if ($retryResult['error']) {
-                return ['error' => 'Generated app violates sandbox rules (auto-retry also failed)', 'status' => 422, 'violations' => $violations];
-            }
-
-            $retryBuild = $this->buildRuntimePackageFromRaw($retryResult['package']);
-            if (!$retryBuild['ok']) {
-                return ['error' => 'Generated app could not be transpiled', 'status' => 422, 'transpile_status' => 'failed', 'auto_retry_attempted' => true];
-            }
-
-            $retryPackage = $retryBuild['package'];
-            $retrySourceJsx = $retryBuild['source_jsx'];
-            $retryViolations = $this->validatePackage($retryPackage, $retrySourceJsx);
-            if (!empty($retryViolations)) {
-                return ['error' => 'Generated app violates sandbox rules', 'status' => 422, 'violations' => $retryViolations, 'auto_retry_attempted' => true];
-            }
-
-            $package = $retryPackage;
-            $sourceJsx = $retrySourceJsx;
-            $didAutoRetry = true;
+            return [
+                'error' => 'Generated app violates sandbox rules. Please try again with a more specific revision request.',
+                'status' => 422,
+                'violations' => $violations,
+            ];
         }
 
         if ($this->packageEquivalentToExisting($package, $sourceJsx, $existingApp)) {
             $noOpRevisionDetected = true;
-
-            $noOpMessage = <<<MSG
-Your previous output did not apply any meaningful change to the current application.
-Please revise again and apply the request concretely.
-Requirements:
-- keep same app concept unless user requested redesign
-- make clear visible changes in at least one of title/html/css/js
-- return complete JSON with title/html/css/js
-MSG;
-
-            $messages[] = ['role' => 'assistant', 'content' => $result['raw']];
-            $messages[] = ['role' => 'user', 'content' => $noOpMessage];
-
-            $retryNoOp = $this->llm->callLLM($messages, $modelOverride);
-            if (!$retryNoOp['error']) {
-                $retryNoOpBuild = $this->buildRuntimePackageFromRaw($retryNoOp['package']);
-                if ($retryNoOpBuild['ok']) {
-                    $retryNoOpPackage = $retryNoOpBuild['package'];
-                    $retryNoOpSourceJsx = $retryNoOpBuild['source_jsx'];
-                    $retryNoOpViolations = $this->validatePackage($retryNoOpPackage, $retryNoOpSourceJsx);
-                    if (empty($retryNoOpViolations) && !$this->packageEquivalentToExisting($retryNoOpPackage, $retryNoOpSourceJsx, $existingApp)) {
-                        $package = $retryNoOpPackage;
-                        $sourceJsx = $retryNoOpSourceJsx;
-                        $didAutoRetry = true;
-                    }
-                }
-            }
         }
 
         $changeSummary = null;
@@ -188,7 +129,7 @@ MSG;
         if ((bool) env('REVISION_CHANGE_SUMMARY_ENABLED', true) && is_array($beforePackage)) {
             $afterForSummary = $package;
             $afterForSummary['js'] = $sourceJsx;
-            $changeSummary = $this->buildOpenInteractionChangeSummary($beforePackage, $afterForSummary, $noOpRevisionDetected, $didAutoRetry);
+            $changeSummary = $this->buildOpenInteractionChangeSummary($beforePackage, $afterForSummary, $noOpRevisionDetected, false);
             $humanChangeSummary = $this->buildDeterministicHumanChangeSummary($changeSummary);
             $modelSentence = $this->generateHumanChangeSummarySentence($prompt, $changeSummary);
             if (is_string($modelSentence) && $modelSentence !== '') {
@@ -204,7 +145,6 @@ MSG;
             'source_jsx' => $sourceJsx,
             'runtime' => 'react_jsx',
             'transpile_status' => 'ok',
-            'did_auto_retry' => $didAutoRetry,
             'no_op_revision_detected' => $noOpRevisionDetected,
             'change_summary' => $changeSummary,
             'human_change_summary' => $humanChangeSummary,
@@ -570,15 +510,12 @@ NODE;
                 ],
             ];
 
-            $result = $this->llm->callLLM($messages, (string) env('OPENAI_MODEL_TEXT_FAST', env('OPENAI_MODEL', 'gpt-4.1-mini')));
+            $result = $this->llm->callLLMForText($messages, (string) env('OPENAI_MODEL_TEXT_FAST', env('OPENAI_MODEL', 'gpt-4.1-mini')));
             if ($result['error']) {
                 return null;
             }
 
-            $candidate = trim((string) ($result['package']['text'] ?? ''));
-            if ($candidate === '' && is_string($result['raw'] ?? null)) {
-                $candidate = trim((string) $result['raw']);
-            }
+            $candidate = trim((string) ($result['text'] ?? ''));
             if ($candidate === '') {
                 return null;
             }
