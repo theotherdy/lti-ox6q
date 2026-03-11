@@ -31,6 +31,7 @@ const EDITOR_COMPACT_HEIGHT = 600
 const VISION_MODE_AUTO = 'auto'
 const VISION_MODE_FORCE = 'force'
 const VISION_MODE_OFF = 'off'
+const UI_LTI_JWT_CACHE_KEY = 'jwt'
 
 const RIGHTS_BASIS_OPTIONS = [
   { value: 'copyright_holder', label: 'I hold the copyright' },
@@ -93,6 +94,24 @@ function detectGeneratedFromPackage(pkg) {
     return css !== '' || js !== '' || (html !== '' && html !== "<div id='app'></div>")
   }
   return false
+}
+
+function cacheToolSupportJwtForRetriever(jwt) {
+  if (!jwt || typeof jwt !== 'string') return
+
+  const payload = JSON.stringify({
+    token: jwt,
+    timestamp: Date.now(),
+  })
+
+  try {
+    // @oxctl/ui-lti fallback currently reads from localStorage key "jwt".
+    localStorage.setItem(UI_LTI_JWT_CACHE_KEY, payload)
+  } catch {}
+
+  try {
+    sessionStorage.setItem(UI_LTI_JWT_CACHE_KEY, payload)
+  } catch {}
 }
 
 export default function App() {
@@ -190,16 +209,6 @@ export default function App() {
 
   useEffect(() => {
     if (!isLtiLaunch) return
-    sessionStorage.removeItem('accessToken')
-    sessionStorage.removeItem('bootstrapInfo')
-    sessionStorage.removeItem('toolSupportJwt')
-    sessionStorage.removeItem('ltiServer')
-    sessionStorage.removeItem('previousApp')
-    sessionStorage.removeItem('savedApp')
-  }, [isLtiLaunch])
-
-  useEffect(() => {
-    if (!isLtiLaunch) return
     const handleMessage = (e) => {
       let data = e.data
       if (typeof data === 'string') {
@@ -237,8 +246,11 @@ export default function App() {
   const handleLtiJwt = useCallback(async (receivedToolSupportJwt, server) => {
     setToolSupportJwt(receivedToolSupportJwt)
     setLtiServer(server)
-    sessionStorage.setItem('toolSupportJwt', receivedToolSupportJwt)
-    sessionStorage.setItem('ltiServer', server)
+    cacheToolSupportJwtForRetriever(receivedToolSupportJwt)
+    if (!isLtiLaunch) {
+      sessionStorage.setItem('toolSupportJwt', receivedToolSupportJwt)
+      sessionStorage.setItem('ltiServer', server)
+    }
 
     try {
       const res = await fetch(`${API_BASE}/api/auth/bootstrap`, {
@@ -259,14 +271,18 @@ export default function App() {
     } catch (e) {
       setErrorMessage(e.message)
     }
-  }, [])
+  }, [isLtiLaunch])
 
   function setToken(token) {
     if (token) {
-      sessionStorage.setItem('accessToken', token)
+      if (!isLtiLaunch) {
+        sessionStorage.setItem('accessToken', token)
+      }
       setAccessToken(token)
     } else {
-      sessionStorage.removeItem('accessToken')
+      if (!isLtiLaunch) {
+        sessionStorage.removeItem('accessToken')
+      }
       setAccessToken(null)
     }
   }
