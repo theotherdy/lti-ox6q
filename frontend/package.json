@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "build": "npm run build:app && npm run build:runners && npm run build:runner-pages",
+    "build:app": "vite build",
+    "build:runners": "vite build --config vite.runner-open.config.js && vite build --config vite.runner-structured.config.js",
+    "build:runner-pages": "node scripts/write-runner-pages.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

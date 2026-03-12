@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Copy only manifests first (for better caching when not volume-mounted)
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci --include=optional
 
 # We intentionally don't run npm install here because in dev we'll mount the source.
 # The start script will install dependencies if node_modules is missing.
