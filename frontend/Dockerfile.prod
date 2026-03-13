@@ -7,6 +7,9 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci --include=optional
+# Work around npm optional dependency bug that can skip Rollup's native binary.
+# GH Actions runs Linux x64 GNU, and Vite/Rollup needs this package at build time.
+RUN npm install --no-save @rollup/rollup-linux-x64-gnu
 
 COPY . .
 
