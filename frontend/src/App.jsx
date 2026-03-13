@@ -1,7 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import { LtiHeightLimit } from '@oxctl/ui-lti'
-import { InstUISettingsProvider } from '@instructure/emotion'
-import { canvas, canvasHighContrast } from '@instructure/ui-themes'
+import { LtiHeightLimit, LtiPageSettings, LtiTokenRetriever } from '@oxctl/ui-lti'
 import Runner from './components/Runner'
 import StructuredRunnerFrame from './components/StructuredRunnerFrame'
 import DeepLinkForm from './components/DeepLinkForm'
@@ -197,8 +195,6 @@ export default function App() {
   const [showStateResetWarning, setShowStateResetWarning] = useState(false)
   const [stateSummary, setStateSummary] = useState(null)
   const [resetNonInstructorStateOnSave, setResetNonInstructorStateOnSave] = useState(false)
-  const [ltiTheme, setLtiTheme] = useState(canvas)
-  const [ltiTokenLoading, setLtiTokenLoading] = useState(false)
 
   const refreshInFlightRef = useRef(null)
   const contentRootRef = useRef(null)
@@ -247,72 +243,6 @@ export default function App() {
   const targetLinkUri = lti?.target_link_uri || `${window.location.origin}${window.location.pathname}`
   const canManageAssets = !isLtiLaunch || isInstructor
 
-  useEffect(() => {
-    if (!isLtiLaunch) return
-
-    let mounted = true
-
-    const parseMessage = (raw) => {
-      if (!raw) return null
-      if (typeof raw === 'string') {
-        try {
-          return JSON.parse(raw)
-        } catch {
-          return null
-        }
-      }
-      if (typeof raw === 'object') return raw
-      return null
-    }
-
-    const fetchThemeOverrides = async (themeUrl) => {
-      if (typeof themeUrl !== 'string' || themeUrl.trim() === '') return null
-
-      const maxAttempts = 2
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        try {
-          const response = await fetch(themeUrl)
-          if (!response.ok) continue
-          const json = await response.json()
-          return (json && typeof json === 'object') ? json : null
-        } catch {
-          // Retry once before falling back to base canvas theme.
-        }
-      }
-      return null
-    }
-
-    const handleMessage = (event) => {
-      const msg = parseMessage(event.data)
-      if (!msg || msg.subject !== 'lti.getPageSettings.response') return
-      const pageSettings = msg.pageSettings
-      if (!pageSettings || typeof pageSettings !== 'object') return
-
-      if (pageSettings.use_high_contrast) {
-        if (mounted) setLtiTheme(canvasHighContrast)
-        return
-      }
-
-      const themeUrl = pageSettings.active_brand_config_json_url
-      fetchThemeOverrides(themeUrl)
-        .then((overrides) => {
-          if (!mounted) return
-          setLtiTheme(overrides ? { ...canvas, ...overrides } : canvas)
-        })
-        .catch(() => {
-          if (mounted) setLtiTheme(canvas)
-        })
-    }
-
-    window.addEventListener('message', handleMessage)
-    ;(window.parent || window.opener)?.postMessage({ subject: 'lti.getPageSettings' }, '*')
-
-    return () => {
-      mounted = false
-      window.removeEventListener('message', handleMessage)
-    }
-  }, [isLtiLaunch])
-
   const handleLtiJwt = useCallback(async (receivedToolSupportJwt, server) => {
     setToolSupportJwt(receivedToolSupportJwt)
     setLtiServer(server)
@@ -342,69 +272,6 @@ export default function App() {
       setErrorMessage(e.message)
     }
   }, [isLtiLaunch])
-
-  useEffect(() => {
-    if (!isLtiLaunch || accessToken || ltiTokenLoading) return
-
-    const params = new URLSearchParams(window.location.search)
-    const launchTokenRaw = params.get('token')
-    const serverRaw = params.get('server')
-    const launchToken = launchTokenRaw ? decodeURIComponent(launchTokenRaw) : ''
-    const server = serverRaw ? decodeURIComponent(serverRaw) : ''
-
-    if (!launchToken) {
-      setErrorMessage('No id found to load token with')
-      return
-    }
-    if (!server) {
-      setErrorMessage('No server found to load from')
-      return
-    }
-
-    let cancelled = false
-    setLtiTokenLoading(true)
-
-    const loadToken = async () => {
-      try {
-        const formData = new FormData()
-        formData.append('key', launchToken)
-
-        const response = await fetch(`${server}/token`, {
-          method: 'POST',
-          body: formData,
-        })
-
-        if (!response.ok) {
-          if (response.status === 403) {
-            throw new Error('Sorry the tool is not currently available to you.')
-          }
-          throw new Error('Failed to load token.')
-        }
-
-        const json = await response.json().catch(() => ({}))
-        const toolSupportJwt = json.jwt || json.token_value
-        if (!toolSupportJwt) {
-          throw new Error('Failed to load token.')
-        }
-
-        if (!cancelled) {
-          await handleLtiJwt(toolSupportJwt, server)
-        }
-      } catch (e) {
-        if (!cancelled) {
-          const message = e instanceof Error ? e.message : 'Failed to load token.'
-          setErrorMessage(message)
-        }
-      } finally {
-        if (!cancelled) setLtiTokenLoading(false)
-      }
-    }
-
-    loadToken()
-    return () => {
-      cancelled = true
-    }
-  }, [accessToken, handleLtiJwt, isLtiLaunch, ltiTokenLoading])
 
   function setToken(token) {
     if (token) {
@@ -987,6 +854,12 @@ export default function App() {
     if (!isDeepLinkLaunch) return
     if (!deepLinkReturnUrl) {
       setErrorMessage('Missing deep_link_return_url claim in deep-link launch.')
+      return
+    }
+    const rawCourseId = lti?.custom?.canvas_course_id
+    const parsedCourseId = Number.parseInt(String(rawCourseId ?? ''), 10)
+    if (!Number.isFinite(parsedCourseId) || parsedCourseId <= 0) {
+      setErrorMessage('Missing or invalid course context for deep-link insertion.')
       return
     }
     if (!ltiServer || !toolSupportJwt) {
@@ -1987,15 +1860,13 @@ export default function App() {
 
   if (isLtiLaunch) {
     return (
-      <InstUISettingsProvider theme={ltiTheme}>
-        <LtiHeightLimit>
-          {!accessToken && ltiTokenLoading ? (
-            <View as="div" padding="large">
-              <Spinner renderTitle="Loading LTI token…" size="large" />
-            </View>
-          ) : content}
-        </LtiHeightLimit>
-      </InstUISettingsProvider>
+      <LtiTokenRetriever handleJwt={handleLtiJwt}>
+        <LtiPageSettings>
+          <LtiHeightLimit>
+            {content}
+          </LtiHeightLimit>
+        </LtiPageSettings>
+      </LtiTokenRetriever>
     )
   }
 
