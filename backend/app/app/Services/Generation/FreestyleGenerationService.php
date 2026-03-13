@@ -236,16 +236,21 @@ JSX;
   let memoryState = null;
 
   function clone(v) {
-    return typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v));
+    if (v === undefined) return null;
+    try {
+      return typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v));
+    } catch (_) {
+      return v;
+    }
   }
 
   const sdkFacade = {
     getState: () => {
       if (hasSDK) {
-        const value = sdk.getState() || {};
-        return value;
+        const value = sdk.getState();
+        return value === undefined ? null : value;
       }
-      if (!memoryState) memoryState = {};
+      if (memoryState === null || memoryState === undefined) return null;
       return clone(memoryState);
     },
     setState: (next) => {
