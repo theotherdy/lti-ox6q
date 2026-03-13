@@ -41,8 +41,8 @@ export default function Runner({ apiBase, token, pkg, onError }) {
   function pushNotice({ message, variant }) {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
     const msg = String(message || '').slice(0, 300)
-    const v = (variant === 'error') ? 'danger' : variant
-    const safeVariant = ['info', 'success', 'warning', 'danger'].includes(v) ? v : 'info'
+    const v = (variant === 'danger') ? 'error' : variant
+    const safeVariant = ['info', 'success', 'warning', 'error'].includes(v) ? v : 'info'
 
     setNotices((xs) => [...xs, { id, message: msg, variant: safeVariant }].slice(-3))
     setTimeout(() => setNotices((xs) => xs.filter((n) => n.id !== id)), 3000)

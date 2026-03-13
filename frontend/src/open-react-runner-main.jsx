@@ -125,7 +125,8 @@ function executePackage(pkg, sdk, channel) {
     const run = new Function(code)
     run()
   } catch (e) {
-    sdk.notify({ variant: 'danger', message: `Runtime error: ${String(e?.message || e)}` })
+    console.error('[open-react-runner] Runtime error while executing package JS:', e)
+    sdk.notify({ variant: 'error', message: `Runtime error: ${String(e?.message || e)}` })
   }
 
   return setupResize(channel)
