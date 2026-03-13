@@ -1,5 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import { LtiTokenRetriever, LtiPageSettings, LtiHeightLimit } from '@oxctl/ui-lti'
+import { LtiTokenRetriever, LtiHeightLimit } from '@oxctl/ui-lti'
+import { InstUISettingsProvider } from '@instructure/emotion'
+import { canvas, canvasHighContrast } from '@instructure/ui-themes'
 import Runner from './components/Runner'
 import StructuredRunnerFrame from './components/StructuredRunnerFrame'
 import DeepLinkForm from './components/DeepLinkForm'
@@ -195,6 +197,7 @@ export default function App() {
   const [showStateResetWarning, setShowStateResetWarning] = useState(false)
   const [stateSummary, setStateSummary] = useState(null)
   const [resetNonInstructorStateOnSave, setResetNonInstructorStateOnSave] = useState(false)
+  const [ltiTheme, setLtiTheme] = useState(canvas)
 
   const refreshInFlightRef = useRef(null)
   const contentRootRef = useRef(null)
@@ -242,6 +245,72 @@ export default function App() {
   const launchReturnUrl = lti?.launch_presentation?.return_url || null
   const targetLinkUri = lti?.target_link_uri || `${window.location.origin}${window.location.pathname}`
   const canManageAssets = !isLtiLaunch || isInstructor
+
+  useEffect(() => {
+    if (!isLtiLaunch) return
+
+    let mounted = true
+
+    const parseMessage = (raw) => {
+      if (!raw) return null
+      if (typeof raw === 'string') {
+        try {
+          return JSON.parse(raw)
+        } catch {
+          return null
+        }
+      }
+      if (typeof raw === 'object') return raw
+      return null
+    }
+
+    const fetchThemeOverrides = async (themeUrl) => {
+      if (typeof themeUrl !== 'string' || themeUrl.trim() === '') return null
+
+      const maxAttempts = 2
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        try {
+          const response = await fetch(themeUrl)
+          if (!response.ok) continue
+          const json = await response.json()
+          return (json && typeof json === 'object') ? json : null
+        } catch {
+          // Retry once before falling back to base canvas theme.
+        }
+      }
+      return null
+    }
+
+    const handleMessage = (event) => {
+      const msg = parseMessage(event.data)
+      if (!msg || msg.subject !== 'lti.getPageSettings.response') return
+      const pageSettings = msg.pageSettings
+      if (!pageSettings || typeof pageSettings !== 'object') return
+
+      if (pageSettings.use_high_contrast) {
+        if (mounted) setLtiTheme(canvasHighContrast)
+        return
+      }
+
+      const themeUrl = pageSettings.active_brand_config_json_url
+      fetchThemeOverrides(themeUrl)
+        .then((overrides) => {
+          if (!mounted) return
+          setLtiTheme(overrides ? { ...canvas, ...overrides } : canvas)
+        })
+        .catch(() => {
+          if (mounted) setLtiTheme(canvas)
+        })
+    }
+
+    window.addEventListener('message', handleMessage)
+    ;(window.parent || window.opener)?.postMessage({ subject: 'lti.getPageSettings' }, '*')
+
+    return () => {
+      mounted = false
+      window.removeEventListener('message', handleMessage)
+    }
+  }, [isLtiLaunch])
 
   const handleLtiJwt = useCallback(async (receivedToolSupportJwt, server) => {
     setToolSupportJwt(receivedToolSupportJwt)
@@ -1854,7 +1923,7 @@ export default function App() {
 
   if (isLtiLaunch) {
     return (
-      <LtiPageSettings>
+      <InstUISettingsProvider theme={ltiTheme}>
         <LtiHeightLimit>
           {!accessToken ? (
             <LtiTokenRetriever handleJwt={handleLtiJwt}>
@@ -1862,7 +1931,7 @@ export default function App() {
             </LtiTokenRetriever>
           ) : content}
         </LtiHeightLimit>
-      </LtiPageSettings>
+      </InstUISettingsProvider>
     )
   }
 
