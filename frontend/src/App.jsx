@@ -840,11 +840,25 @@ export default function App() {
       setErrorMessage('Missing deep_link_return_url claim in deep-link launch.')
       return
     }
-    const rawCourseId = lti?.custom?.canvas_course_id
-    const parsedCourseId = Number.parseInt(String(rawCourseId ?? ''), 10)
-    if (!Number.isFinite(parsedCourseId) || parsedCourseId <= 0) {
-      setErrorMessage('Missing or invalid course context for deep-link insertion.')
-      return
+    const candidateCourseIds = [
+      lti?.custom?.canvas_course_id,
+      lti?.canvas_course_id,
+      lti?.context?.id,
+    ]
+      .map((value) => String(value ?? '').trim())
+      .filter((value) => value !== '')
+
+    // Some Canvas deep-link launches don't include a numeric course id claim.
+    // Only fail closed when a course id claim is present but unusable.
+    if (candidateCourseIds.length > 0) {
+      const hasValidCourseId = candidateCourseIds.some((value) => {
+        const parsed = Number.parseInt(value, 10)
+        return Number.isFinite(parsed) && parsed > 0
+      })
+      if (!hasValidCourseId) {
+        setErrorMessage('Missing or invalid course context for deep-link insertion.')
+        return
+      }
     }
     if (!ltiServer || !toolSupportJwt) {
       setErrorMessage('Missing Tool Support context for deep-link insertion.')
