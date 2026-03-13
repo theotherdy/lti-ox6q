@@ -98,6 +98,55 @@ function setupResize(channel) {
   }
 }
 
+function errorMessageFrom(value) {
+  if (value instanceof Error) return value.message || String(value)
+  if (typeof value === 'string') return value
+  return String(value ?? 'Unknown runtime error')
+}
+
+function reportRuntimeError(sdk, value, context = 'runtime') {
+  const message = errorMessageFrom(value)
+  console.error(`[open-react-runner] ${context} error:`, value)
+  sdk.notify({ variant: 'error', message: `Runtime error: ${message}` }).catch(() => {})
+}
+
+class RunnerErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error) {
+    this.props.onError?.(error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            margin: '12px',
+            border: '1px solid #c23b22',
+            borderRadius: '8px',
+            background: '#fff5f5',
+            padding: '12px',
+            color: '#5f2120',
+            fontFamily: 'sans-serif',
+          }}
+        >
+          <strong>Activity runtime error</strong>
+          <div style={{ marginTop: '6px' }}>{errorMessageFrom(this.state.error)}</div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 function executePackage(pkg, sdk, channel) {
   const root = document.getElementById('root')
   if (!root) return
@@ -106,9 +155,36 @@ function executePackage(pkg, sdk, channel) {
   root.innerHTML = String(pkg?.html || DEFAULT_HTML)
   ensureStyleTag().textContent = String(pkg?.css || '')
 
+  const onWindowError = (event) => {
+    reportRuntimeError(sdk, event?.error || event?.message || event, 'window')
+  }
+  const onUnhandledRejection = (event) => {
+    reportRuntimeError(sdk, event?.reason || event, 'promise')
+  }
+  window.addEventListener('error', onWindowError)
+  window.addEventListener('unhandledrejection', onUnhandledRejection)
+
   // Expose globals expected by transpiled package wrapper.
   window.React = React
-  window.ReactDOM = ReactDOM
+  const baseCreateRoot = typeof ReactDOM.createRoot === 'function' ? ReactDOM.createRoot.bind(ReactDOM) : null
+  const safeCreateRoot = baseCreateRoot
+    ? (container, options) => {
+      const realRoot = baseCreateRoot(container, options)
+      return {
+        ...realRoot,
+        render: (element) => realRoot.render(
+          <RunnerErrorBoundary onError={(e) => reportRuntimeError(sdk, e, 'react')}>
+            {element}
+          </RunnerErrorBoundary>,
+        ),
+      }
+    }
+    : null
+
+  window.ReactDOM = {
+    ...ReactDOM,
+    ...(safeCreateRoot ? { createRoot: safeCreateRoot } : {}),
+  }
   if (typeof window.ReactDOM.render !== 'function' && typeof window.ReactDOM.createRoot === 'function') {
     // Compatibility for model outputs still using legacy ReactDOM.render API.
     window.ReactDOM.render = (element, container) => {
@@ -125,11 +201,15 @@ function executePackage(pkg, sdk, channel) {
     const run = new Function(code)
     run()
   } catch (e) {
-    console.error('[open-react-runner] Runtime error while executing package JS:', e)
-    sdk.notify({ variant: 'error', message: `Runtime error: ${String(e?.message || e)}` })
+    reportRuntimeError(sdk, e, 'execute')
   }
 
-  return setupResize(channel)
+  const cleanupResize = setupResize(channel)
+  return () => {
+    cleanupResize?.()
+    window.removeEventListener('error', onWindowError)
+    window.removeEventListener('unhandledrejection', onUnhandledRejection)
+  }
 }
 
 function RunnerApp() {
