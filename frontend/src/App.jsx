@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import { LtiHeightLimit, LtiPageSettings, LtiTokenRetriever } from '@oxctl/ui-lti'
+import { LtiTokenRetriever, LtiPageSettings, LtiHeightLimit } from '@oxctl/ui-lti'
 import Runner from './components/Runner'
 import StructuredRunnerFrame from './components/StructuredRunnerFrame'
 import DeepLinkForm from './components/DeepLinkForm'
@@ -31,7 +31,6 @@ const EDITOR_COMPACT_HEIGHT = 600
 const VISION_MODE_AUTO = 'auto'
 const VISION_MODE_FORCE = 'force'
 const VISION_MODE_OFF = 'off'
-const UI_LTI_JWT_CACHE_KEY = 'jwt'
 
 const RIGHTS_BASIS_OPTIONS = [
   { value: 'copyright_holder', label: 'I hold the copyright' },
@@ -94,24 +93,6 @@ function detectGeneratedFromPackage(pkg) {
     return css !== '' || js !== '' || (html !== '' && html !== "<div id='app'></div>")
   }
   return false
-}
-
-function cacheToolSupportJwtForRetriever(jwt) {
-  if (!jwt || typeof jwt !== 'string') return
-
-  const payload = JSON.stringify({
-    token: jwt,
-    timestamp: Date.now(),
-  })
-
-  try {
-    // @oxctl/ui-lti fallback currently reads from localStorage key "jwt".
-    localStorage.setItem(UI_LTI_JWT_CACHE_KEY, payload)
-  } catch {}
-
-  try {
-    sessionStorage.setItem(UI_LTI_JWT_CACHE_KEY, payload)
-  } catch {}
 }
 
 export default function App() {
@@ -209,6 +190,16 @@ export default function App() {
 
   useEffect(() => {
     if (!isLtiLaunch) return
+    sessionStorage.removeItem('accessToken')
+    sessionStorage.removeItem('bootstrapInfo')
+    sessionStorage.removeItem('toolSupportJwt')
+    sessionStorage.removeItem('ltiServer')
+    sessionStorage.removeItem('previousApp')
+    sessionStorage.removeItem('savedApp')
+  }, [isLtiLaunch])
+
+  useEffect(() => {
+    if (!isLtiLaunch) return
     const handleMessage = (e) => {
       let data = e.data
       if (typeof data === 'string') {
@@ -246,11 +237,8 @@ export default function App() {
   const handleLtiJwt = useCallback(async (receivedToolSupportJwt, server) => {
     setToolSupportJwt(receivedToolSupportJwt)
     setLtiServer(server)
-    cacheToolSupportJwtForRetriever(receivedToolSupportJwt)
-    if (!isLtiLaunch) {
-      sessionStorage.setItem('toolSupportJwt', receivedToolSupportJwt)
-      sessionStorage.setItem('ltiServer', server)
-    }
+    sessionStorage.setItem('toolSupportJwt', receivedToolSupportJwt)
+    sessionStorage.setItem('ltiServer', server)
 
     try {
       const res = await fetch(`${API_BASE}/api/auth/bootstrap`, {
@@ -271,18 +259,14 @@ export default function App() {
     } catch (e) {
       setErrorMessage(e.message)
     }
-  }, [isLtiLaunch])
+  }, [])
 
   function setToken(token) {
     if (token) {
-      if (!isLtiLaunch) {
-        sessionStorage.setItem('accessToken', token)
-      }
+      sessionStorage.setItem('accessToken', token)
       setAccessToken(token)
     } else {
-      if (!isLtiLaunch) {
-        sessionStorage.removeItem('accessToken')
-      }
+      sessionStorage.removeItem('accessToken')
       setAccessToken(null)
     }
   }
@@ -1860,13 +1844,15 @@ export default function App() {
 
   if (isLtiLaunch) {
     return (
-      <LtiTokenRetriever handleJwt={handleLtiJwt}>
-        <LtiPageSettings>
-          <LtiHeightLimit>
-            {content}
-          </LtiHeightLimit>
-        </LtiPageSettings>
-      </LtiTokenRetriever>
+      <LtiPageSettings>
+        <LtiHeightLimit>
+          {!accessToken ? (
+            <LtiTokenRetriever handleJwt={handleLtiJwt}>
+              {content}
+            </LtiTokenRetriever>
+          ) : content}
+        </LtiHeightLimit>
+      </LtiPageSettings>
     )
   }
 
