@@ -48,6 +48,9 @@ INSTRUCTIONS:
 - Use window.sdk.getState(), setState(), notify() where appropriate.
 - App must still work when window.sdk is unavailable (provide local in-memory state fallback).
 - Do not use forms, fetch/XMLHttpRequest, external script imports, browser storage, or navigation APIs.
+- Defensive coding is mandatory: treat all state/input values as unknown types.
+- Coerce numeric inputs with Number(...) and guard with Number.isFinite(...) before numeric operations.
+- Never call numeric methods (e.g. toFixed/toPrecision) on values that have not been validated as numbers.
 SYS;
 
             $user = <<<USR
@@ -75,6 +78,9 @@ Rules:
 - Do NOT use <form> tags or native form submit.
 - Do NOT use localStorage/sessionStorage/document.cookie/window.location.
 - Prefer AVAILABLE_IMAGE_ASSETS URLs when rendering images.
+- Defensive coding is mandatory: treat all state/input values as unknown types.
+- Coerce numeric inputs with Number(...) and guard with Number.isFinite(...) before numeric operations.
+- Never call numeric methods (e.g. toFixed/toPrecision) on values that have not been validated as numbers.
 SYS;
 
             $user = <<<USR
