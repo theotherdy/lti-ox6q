@@ -1,7 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import { LtiTokenRetriever, LtiHeightLimit } from '@oxctl/ui-lti'
-import { InstUISettingsProvider } from '@instructure/emotion'
-import { canvas } from '@instructure/ui-themes'
+import { LtiTokenRetriever, LtiPageSettings, LtiHeightLimit } from '@oxctl/ui-lti'
 import Runner from './components/Runner'
 import StructuredRunnerFrame from './components/StructuredRunnerFrame'
 import DeepLinkForm from './components/DeepLinkForm'
@@ -1860,7 +1858,7 @@ export default function App() {
 
   if (isLtiLaunch) {
     return (
-      <InstUISettingsProvider theme={canvas}>
+      <LtiPageSettings>
         <LtiHeightLimit>
           {!accessToken ? (
             <LtiTokenRetriever handleJwt={handleLtiJwt}>
@@ -1868,7 +1866,7 @@ export default function App() {
             </LtiTokenRetriever>
           ) : content}
         </LtiHeightLimit>
-      </InstUISettingsProvider>
+      </LtiPageSettings>
     )
   }
 
