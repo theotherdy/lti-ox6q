@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import { LtiTokenRetriever, LtiHeightLimit } from '@oxctl/ui-lti'
+import { LtiHeightLimit } from '@oxctl/ui-lti'
 import { InstUISettingsProvider } from '@instructure/emotion'
 import { canvas, canvasHighContrast } from '@instructure/ui-themes'
 import Runner from './components/Runner'
@@ -198,6 +198,7 @@ export default function App() {
   const [stateSummary, setStateSummary] = useState(null)
   const [resetNonInstructorStateOnSave, setResetNonInstructorStateOnSave] = useState(false)
   const [ltiTheme, setLtiTheme] = useState(canvas)
+  const [ltiTokenLoading, setLtiTokenLoading] = useState(false)
 
   const refreshInFlightRef = useRef(null)
   const contentRootRef = useRef(null)
@@ -341,6 +342,69 @@ export default function App() {
       setErrorMessage(e.message)
     }
   }, [isLtiLaunch])
+
+  useEffect(() => {
+    if (!isLtiLaunch || accessToken || ltiTokenLoading) return
+
+    const params = new URLSearchParams(window.location.search)
+    const launchTokenRaw = params.get('token')
+    const serverRaw = params.get('server')
+    const launchToken = launchTokenRaw ? decodeURIComponent(launchTokenRaw) : ''
+    const server = serverRaw ? decodeURIComponent(serverRaw) : ''
+
+    if (!launchToken) {
+      setErrorMessage('No id found to load token with')
+      return
+    }
+    if (!server) {
+      setErrorMessage('No server found to load from')
+      return
+    }
+
+    let cancelled = false
+    setLtiTokenLoading(true)
+
+    const loadToken = async () => {
+      try {
+        const formData = new FormData()
+        formData.append('key', launchToken)
+
+        const response = await fetch(`${server}/token`, {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!response.ok) {
+          if (response.status === 403) {
+            throw new Error('Sorry the tool is not currently available to you.')
+          }
+          throw new Error('Failed to load token.')
+        }
+
+        const json = await response.json().catch(() => ({}))
+        const toolSupportJwt = json.jwt || json.token_value
+        if (!toolSupportJwt) {
+          throw new Error('Failed to load token.')
+        }
+
+        if (!cancelled) {
+          await handleLtiJwt(toolSupportJwt, server)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          const message = e instanceof Error ? e.message : 'Failed to load token.'
+          setErrorMessage(message)
+        }
+      } finally {
+        if (!cancelled) setLtiTokenLoading(false)
+      }
+    }
+
+    loadToken()
+    return () => {
+      cancelled = true
+    }
+  }, [accessToken, handleLtiJwt, isLtiLaunch, ltiTokenLoading])
 
   function setToken(token) {
     if (token) {
@@ -1925,10 +1989,10 @@ export default function App() {
     return (
       <InstUISettingsProvider theme={ltiTheme}>
         <LtiHeightLimit>
-          {!accessToken ? (
-            <LtiTokenRetriever handleJwt={handleLtiJwt}>
-              {content}
-            </LtiTokenRetriever>
+          {!accessToken && ltiTokenLoading ? (
+            <View as="div" padding="large">
+              <Spinner renderTitle="Loading LTI token…" size="large" />
+            </View>
           ) : content}
         </LtiHeightLimit>
       </InstUISettingsProvider>
