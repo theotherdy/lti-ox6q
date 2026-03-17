@@ -1386,18 +1386,6 @@ export default function App() {
           onDismiss={() => setIsTrayOpen(false)}
         >
           <View as="div" padding="medium">
-            {errorMessage && (
-              <Alert
-                variant="error"
-                margin="0 0 small 0"
-                renderCloseButtonLabel="Close"
-                onDismiss={() => setErrorMessage(null)}
-                variantScreenReaderLabel="Error, "
-              >
-                {errorMessage}
-              </Alert>
-            )}
-
             {showStartAgainConfirm && (
               <Alert variant="warning" margin="small 0">
                 <View as="div">
@@ -1673,6 +1661,29 @@ export default function App() {
                 </ToggleDetails>
               </View>
 
+              {errorMessage && (
+                <Alert
+                  variant="error"
+                  margin="small 0"
+                  renderCloseButtonLabel="Close"
+                  onDismiss={() => setErrorMessage(null)}
+                  variantScreenReaderLabel="Error, "
+                >
+                  {errorMessage}
+                </Alert>
+              )}
+
+              {generating && (
+                <View as="div" margin="small 0" padding="small" background="secondary">
+                  <Flex alignItems="center" gap="small">
+                    <Spinner size="x-small" renderTitle="Generating" />
+                    <Text>
+                      {appPackage ? 'Revising' : 'Generating'} app… {elapsedTime}s
+                    </Text>
+                  </Flex>
+                </View>
+              )}
+
               <Flex gap="small" margin="medium 0 0 0" justifyItems="end" style={{ flexWrap: 'wrap' }}>
                 {hasGeneratedApp && !showStartAgainConfirm && (
                   <Button
@@ -1742,17 +1753,6 @@ export default function App() {
                 </Flex>
               )}
             </View>
-
-            {generating && (
-              <View as="div" margin="small 0" padding="small" background="secondary">
-                <Flex alignItems="center" gap="small">
-                  <Spinner size="x-small" renderTitle="Generating" />
-                  <Text>
-                    {appPackage ? 'Revising' : 'Generating'} app… {elapsedTime}s
-                  </Text>
-                </Flex>
-              </View>
-            )}
           </View>
         </DrawerLayout.Tray>
 
