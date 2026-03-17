@@ -41,6 +41,19 @@ class LlmGenerationService
         $startTime = microtime(true);
         $resolvedModel = (string) ($model ?: env('OPENAI_MODEL', 'gpt-4.1-mini'));
         $useResponsesApi = $this->shouldUseResponsesApi($resolvedModel);
+        $apiPath = $useResponsesApi ? '/v1/responses' : '/v1/chat/completions';
+        $temperature = (float) env('OPENAI_TEMPERATURE', 0.3);
+        $payload = $useResponsesApi
+            ? [
+                'model' => $resolvedModel,
+                'temperature' => $temperature,
+                'input' => $this->toResponsesInput($messages),
+            ]
+            : [
+                'model' => $resolvedModel,
+                'temperature' => $temperature,
+                'messages' => $messages,
+            ];
 
         try {
             $request = Http::withToken(config('services.openai.key'))
@@ -48,16 +61,8 @@ class LlmGenerationService
                 ->retry(2, 1000);
 
             $res = $useResponsesApi
-                ? $request->post('https://api.openai.com/v1/responses', [
-                    'model' => $resolvedModel,
-                    'temperature' => (float) env('OPENAI_TEMPERATURE', 0.3),
-                    'input' => $this->toResponsesInput($messages),
-                ])
-                : $request->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => $resolvedModel,
-                    'temperature' => (float) env('OPENAI_TEMPERATURE', 0.3),
-                    'messages' => $messages,
-                ]);
+                ? $request->post('https://api.openai.com/v1/responses', $payload)
+                : $request->post('https://api.openai.com/v1/chat/completions', $payload);
 
             $duration = microtime(true) - $startTime;
 
@@ -75,7 +80,7 @@ class LlmGenerationService
             Log::info('OpenAI API request succeeded', [
                 'duration' => round($duration, 2) . 's',
                 'tokens_used' => $responseData['usage']['total_tokens'] ?? null,
-                'api_path' => $useResponsesApi ? '/v1/responses' : '/v1/chat/completions',
+                'api_path' => $apiPath,
             ]);
 
             $text = $useResponsesApi

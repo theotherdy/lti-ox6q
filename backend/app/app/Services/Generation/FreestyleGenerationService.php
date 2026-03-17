@@ -40,6 +40,8 @@ JSX SOURCE:
 
 INSTRUCTIONS:
 - User wants specific changes to this application.
+- You may fully rewrite structure, styling, and logic when needed; do not preserve prior code if it blocks the requested outcome.
+- Prior code is context, not a constraint. Correct broken patterns instead of repeating them.
 - Return COMPLETE revised application (not just changes).
 - Output ONLY valid JSON with title, html, css, js.
 - "js" must be JSX source code (not transpiled output).
@@ -102,6 +104,75 @@ USR;
             ['role' => 'user', 'content' => $userContent],
         ];
 
+        $attempt = $this->attemptPackageGeneration($messages, $modelOverride, $existingApp);
+        if (isset($attempt['error'])) {
+            return $attempt;
+        }
+
+        $didAutoRetry = false;
+        if (
+            $existingApp
+            && !empty($attempt['no_op_revision_detected'])
+            && $this->shouldAutoRetryNoOpRevision()
+        ) {
+            $retryMessages = $messages;
+            $retryMessages[] = [
+                'role' => 'user',
+                'content' => <<<'TXT'
+Retry required: the previous revision attempt returned no meaningful code changes.
+Apply the user's request with substantive edits this time.
+Change at least one of: HTML structure, CSS styling, or JSX interaction logic.
+Return full JSON only.
+TXT,
+            ];
+
+            $retry = $this->attemptPackageGeneration($retryMessages, $modelOverride, $existingApp);
+            if (!isset($retry['error'])) {
+                $attempt = $retry;
+                $didAutoRetry = true;
+            } else {
+                Log::warning('No-op revision auto-retry failed; returning first attempt', [
+                    'error' => $retry['error'] ?? 'unknown',
+                    'status' => $retry['status'] ?? null,
+                ]);
+            }
+        }
+
+        $changeSummary = null;
+        $humanChangeSummary = [];
+        if ((bool) env('REVISION_CHANGE_SUMMARY_ENABLED', true) && is_array($beforePackage)) {
+            $afterForSummary = $attempt['package'];
+            $afterForSummary['js'] = $attempt['source_jsx'];
+            $changeSummary = $this->buildOpenInteractionChangeSummary(
+                $beforePackage,
+                $afterForSummary,
+                (bool) $attempt['no_op_revision_detected'],
+                $didAutoRetry
+            );
+            $humanChangeSummary = $this->buildDeterministicHumanChangeSummary($changeSummary);
+            $modelSentence = $this->generateHumanChangeSummarySentence($prompt, $changeSummary);
+            if (is_string($modelSentence) && $modelSentence !== '') {
+                array_unshift($humanChangeSummary, $modelSentence);
+                $humanChangeSummary = array_values(array_unique(array_slice($humanChangeSummary, 0, 3)));
+            }
+        }
+
+        return [
+            'status' => 200,
+            'kind' => 'open_interaction',
+            'package' => $attempt['package'],
+            'source_jsx' => $attempt['source_jsx'],
+            'runtime' => 'react_jsx',
+            'transpile_status' => 'ok',
+            'no_op_revision_detected' => (bool) $attempt['no_op_revision_detected'],
+            'auto_retry' => $didAutoRetry,
+            'change_summary' => $changeSummary,
+            'human_change_summary' => $humanChangeSummary,
+        ];
+    }
+
+    private function attemptPackageGeneration(array $messages, ?string $modelOverride, ?object $existingApp): array
+    {
         $result = $this->llm->callLLM($messages, $modelOverride);
         if ($result['error']) {
             return ['error' => $result['error'], 'status' => 500];
@@ -116,8 +187,6 @@ USR;
         $package = $build['package'];
         $sourceJsx = $build['source_jsx'];
         $violations = $this->validatePackage($package, $sourceJsx);
-        $noOpRevisionDetected = false;
-
         if (!empty($violations)) {
             return [
                 'error' => 'Generated app violates sandbox rules. Please try again with a more specific revision request.',
@@ -126,35 +195,16 @@ USR;
             ];
         }
 
-        if ($this->packageEquivalentToExisting($package, $sourceJsx, $existingApp)) {
-            $noOpRevisionDetected = true;
-        }
-
-        $changeSummary = null;
-        $humanChangeSummary = [];
-        if ((bool) env('REVISION_CHANGE_SUMMARY_ENABLED', true) && is_array($beforePackage)) {
-            $afterForSummary = $package;
-            $afterForSummary['js'] = $sourceJsx;
-            $changeSummary = $this->buildOpenInteractionChangeSummary($beforePackage, $afterForSummary, $noOpRevisionDetected, false);
-            $humanChangeSummary = $this->buildDeterministicHumanChangeSummary($changeSummary);
-            $modelSentence = $this->generateHumanChangeSummarySentence($prompt, $changeSummary);
-            if (is_string($modelSentence) && $modelSentence !== '') {
-                array_unshift($humanChangeSummary, $modelSentence);
-                $humanChangeSummary = array_values(array_unique(array_slice($humanChangeSummary, 0, 3)));
-            }
-        }
-
         return [
-            'status' => 200,
-            'kind' => 'open_interaction',
             'package' => $package,
             'source_jsx' => $sourceJsx,
-            'runtime' => 'react_jsx',
-            'transpile_status' => 'ok',
-            'no_op_revision_detected' => $noOpRevisionDetected,
-            'change_summary' => $changeSummary,
-            'human_change_summary' => $humanChangeSummary,
+            'no_op_revision_detected' => $this->packageEquivalentToExisting($package, $sourceJsx, $existingApp),
         ];
+    }
+
+    private function shouldAutoRetryNoOpRevision(): bool
+    {
+        return (bool) env('REVISION_NO_OP_AUTO_RETRY_ENABLED', true);
     }
 
     public function validatePackage(array $pkg, ?string $sourceJsx = null): array
@@ -485,7 +535,7 @@ NODE;
             }
         } else {
             $bullets[] = 'The revision mostly reproduced the previous version.';
-            $bullets[] = 'Try a more specific request to force clearer changes.';
+            $bullets[] = 'A follow-up retry may be needed to apply the requested edits.';
         }
 
         if (!empty($summary['auto_retry'])) {

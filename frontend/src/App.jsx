@@ -1381,7 +1381,7 @@ export default function App() {
                 ))}
               </Flex>
             ) : (
-              <Text size="small" color="secondary">Try a more specific request to force clearer changes.</Text>
+              <Text size="small" color="secondary">No measurable code-level change was detected in this revision.</Text>
             )}
 
             {Array.isArray(lastRevisionSummary.humanSummary) && lastRevisionSummary.humanSummary.length > 0 && (

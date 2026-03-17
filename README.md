@@ -88,6 +88,7 @@ Secrets that live only in `backend/app/.env` (not in docker-compose):
 |----------|---------|
 | `LOCAL_JWT_SECRET` | Signs local access tokens |
 | `OPENAI_API_KEY` | OpenAI API key for app/question generation |
+| `REVISION_NO_OP_AUTO_RETRY_ENABLED` | Set `false` to disable automatic retry when a revision returns unchanged (default `true`) |
 
 ## Production deployment
 
