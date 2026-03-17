@@ -120,6 +120,21 @@ function detectGeneratedFromPackage(pkg) {
   return false
 }
 
+function isValidGeneratedPackageResponse(pkg) {
+  if (!pkg || typeof pkg !== 'object') return false
+  if (pkg.kind === MODE_STRUCTURED) {
+    return Array.isArray(pkg.questions) && pkg.questions.length > 0
+  }
+  if (pkg.kind === MODE_OPEN) {
+    return (
+      typeof pkg.html === 'string'
+      && typeof pkg.css === 'string'
+      && typeof pkg.js === 'string'
+    )
+  }
+  return false
+}
+
 function extractApiError(body, fallbackMessage) {
   if (typeof body?.error === 'string' && body.error.trim() !== '') return body.error
   if (typeof body?.message === 'string' && body.message.trim() !== '') return body.message
@@ -553,6 +568,16 @@ export default function App() {
               : `Generation failed — please try again. (HTTP ${res.status})`,
           ),
         )
+        return
+      }
+
+      if (typeof body?.error === 'string' && body.error.trim() !== '') {
+        setErrorMessage(body.error)
+        return
+      }
+
+      if (!isValidGeneratedPackageResponse(body)) {
+        setErrorMessage('Generation returned an invalid response. Please try again.')
         return
       }
 

@@ -33,7 +33,7 @@ class GenerateAppController extends Controller
     public function generate(Request $request)
     {
         $request->validate([
-            'prompt' => 'required|string|max:10000',
+            'prompt' => 'required|string|max:20000',
             'app_id' => 'nullable|integer|exists:apps,id',
             'preview' => 'nullable|boolean',
             'base_package' => 'nullable|array',
