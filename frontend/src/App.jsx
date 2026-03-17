@@ -20,7 +20,31 @@ import { Checkbox } from '@instructure/ui-checkbox'
 import { IconHamburgerLine, IconXLine, IconFullScreenLine, IconExitFullScreenLine, IconRefreshLine } from '@instructure/ui-icons'
 import { ScreenReaderContent } from '@instructure/ui-a11y-content'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+function resolveApiBase() {
+  const configuredRaw = String(import.meta.env.VITE_API_BASE_URL || '').trim()
+  const viteBaseRaw = String(import.meta.env.BASE_URL || '/').trim() || '/'
+  const viteBase = viteBaseRaw.endsWith('/') ? viteBaseRaw.slice(0, -1) : viteBaseRaw
+
+  if (configuredRaw) {
+    // Accept values like "example.com/ox6q" by coercing to HTTPS in production-style setups.
+    const looksLikeHostWithoutScheme = /^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(\/|$)/i.test(configuredRaw)
+    const configured = looksLikeHostWithoutScheme ? `https://${configuredRaw}` : configuredRaw
+    try {
+      return new URL(configured, window.location.origin).href.replace(/\/$/, '')
+    } catch {
+      // Fall through to environment-aware defaults.
+    }
+  }
+
+  const isLocalHost = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+  if (isLocalHost) {
+    return 'http://localhost:8000'
+  }
+
+  return `${window.location.origin}${viteBase}`.replace(/\/$/, '')
+}
+
+const API_BASE = resolveApiBase()
 const MODE_STRUCTURED = 'structured_question_set'
 const MODE_OPEN = 'open_interaction'
 const DEFAULT_STRUCTURED_TYPE = 'multiple_choice_single_answer'
