@@ -55,6 +55,7 @@ const EDITOR_COMPACT_HEIGHT = 600
 const VISION_MODE_AUTO = 'auto'
 const VISION_MODE_FORCE = 'force'
 const VISION_MODE_OFF = 'off'
+const MAX_PROMPT_CHARS = 20000
 
 const RIGHTS_BASIS_OPTIONS = [
   { value: 'copyright_holder', label: 'I hold the copyright' },
@@ -117,6 +118,18 @@ function detectGeneratedFromPackage(pkg) {
     return css !== '' || js !== '' || (html !== '' && html !== "<div id='app'></div>")
   }
   return false
+}
+
+function extractApiError(body, fallbackMessage) {
+  if (typeof body?.error === 'string' && body.error.trim() !== '') return body.error
+  if (typeof body?.message === 'string' && body.message.trim() !== '') return body.message
+  if (body?.errors && typeof body.errors === 'object') {
+    const firstFieldErrors = Object.values(body.errors).find((value) => Array.isArray(value) && value.length > 0)
+    if (Array.isArray(firstFieldErrors) && typeof firstFieldErrors[0] === 'string') {
+      return firstFieldErrors[0]
+    }
+  }
+  return fallbackMessage
 }
 
 export default function App() {
@@ -461,7 +474,12 @@ export default function App() {
   }
 
   async function generateApp() {
-    if (!prompt.trim() || !accessToken) return
+    const trimmedPrompt = prompt.trim()
+    if (!trimmedPrompt || !accessToken) return
+    if (trimmedPrompt.length > MAX_PROMPT_CHARS) {
+      setErrorMessage(`Prompt is too long (${trimmedPrompt.length}/${MAX_PROMPT_CHARS} characters). Please shorten it and try again.`)
+      return
+    }
 
     const hasAppId = Boolean(appPackage?.id)
     const isRevising = Boolean(hasGeneratedApp && hasAppId)
@@ -481,7 +499,7 @@ export default function App() {
 
     try {
       const requestBody = {
-        prompt,
+        prompt: trimmedPrompt,
         generation_mode: generationMode,
         vision_mode: visionMode,
       }
@@ -527,7 +545,14 @@ export default function App() {
         return
       }
       if (!res.ok) {
-        setErrorMessage(body?.error || (isRevising ? 'Revision failed — please try again.' : 'Generation failed — please try again.'))
+        setErrorMessage(
+          extractApiError(
+            body,
+            isRevising
+              ? `Revision failed — please try again. (HTTP ${res.status})`
+              : `Generation failed — please try again. (HTTP ${res.status})`,
+          ),
+        )
         return
       }
 
@@ -1606,6 +1631,15 @@ export default function App() {
                 disabled={generating}
                 height="100px"
               />
+              <View as="div" margin="xxx-small 0 0 0">
+                <Text
+                  size="x-small"
+                  color="secondary"
+                  style={prompt.trim().length > MAX_PROMPT_CHARS ? { color: '#b3261e' } : undefined}
+                >
+                  {prompt.trim().length}/{MAX_PROMPT_CHARS} characters
+                </Text>
+              </View>
 
               <View as="div" margin="0 0 small 0">
                 <ToggleDetails
@@ -1657,7 +1691,13 @@ export default function App() {
 
                 <Button
                   onClick={generateApp}
-                  disabled={generating || !prompt.trim() || !accessToken || (generationMode === MODE_STRUCTURED && !questionType)}
+                  disabled={
+                    generating
+                    || !prompt.trim()
+                    || prompt.trim().length > MAX_PROMPT_CHARS
+                    || !accessToken
+                    || (generationMode === MODE_STRUCTURED && !questionType)
+                  }
                 >
                   {generating
                     ? (hasGeneratedApp ? 'Revising…' : 'Generating…')
